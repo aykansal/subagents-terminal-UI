@@ -189,6 +189,13 @@ function App() {
     }));
   };
 
+  const toggleExpanded = (id: string) => {
+    setExpandedEntries((current) => ({
+      ...current,
+      [id]: !current[id],
+    }));
+  };
+
   const focusComposer = () => {
     if (!busy) {
       composerInputRef.current?.focus();
@@ -393,7 +400,6 @@ function App() {
         tools: [],
         details: [],
       });
-      setExpanded(outputId, true);
 
       const record = await getGoogleConnectorRecord((line) =>
         appendDetail(outputId, line),
@@ -461,7 +467,6 @@ function App() {
                 usage,
               }));
               appendDetail(outputId, `Turn finished • ${usage}`);
-              setExpanded(outputId, false);
               break;
             }
           }
@@ -514,6 +519,7 @@ function App() {
         divider={divider}
         entries={visibleTranscript}
         expandedEntries={expandedEntries}
+        onToggleExpanded={toggleExpanded}
       />
       <Composer
         busy={busy}

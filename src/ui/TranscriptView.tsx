@@ -8,6 +8,7 @@ type TranscriptViewProps = {
   divider: string;
   entries: TranscriptEntry[];
   expandedEntries: Record<string, boolean>;
+  onToggleExpanded: (id: string) => void;
 };
 
 type TranscriptRowProps = {
@@ -17,6 +18,7 @@ type TranscriptRowProps = {
   expanded: boolean;
   isFirst: boolean;
   isLast: boolean;
+  onToggleExpanded: (id: string) => void;
 };
 
 function TranscriptRow({
@@ -26,6 +28,7 @@ function TranscriptRow({
   expanded,
   isFirst,
   isLast,
+  onToggleExpanded,
 }: TranscriptRowProps) {
   const isUser = entry.role === "user";
   const hasDetails =
@@ -63,7 +66,10 @@ function TranscriptRow({
         </text>
 
         {hasDetails ? (
-          <box style={{ flexDirection: "column", marginTop: 1 }}>
+          <box
+            style={{ flexDirection: "column", marginTop: 1 }}
+            onMouseDown={() => onToggleExpanded(entry.id)}
+          >
             <text fg={uiColors.subtle} attributes={TextAttributes.DIM}>
               {entry.usage
                 ? `${expanded ? "[-]" : "[+]"} ${entry.usage}`
@@ -133,6 +139,7 @@ export function TranscriptView({
   divider,
   entries,
   expandedEntries,
+  onToggleExpanded,
 }: TranscriptViewProps) {
   return (
     <box
@@ -153,6 +160,7 @@ export function TranscriptView({
             expanded={Boolean(expandedEntries[entry.id])}
             isFirst={index === 0}
             isLast={index === entries.length - 1}
+              onToggleExpanded={onToggleExpanded}
           />
         ))}
       </scrollbox>
