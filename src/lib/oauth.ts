@@ -359,15 +359,44 @@ function buildAuthorizationUrl(metadata: OAuthMetadata, redirectUri: string) {
 async function waitForAuthorizationCode(
   redirectUri: string,
   expectedState: string,
-  log: (message: string) => void
+  log: (message: string) => void,
+  signal?: AbortSignal
 ): Promise<string> {
   const callbackUrl = new URL(redirectUri);
   const timeoutMs = 5 * 60 * 1000;
 
   return await new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(() => {
+    let settled = false;
+
+    const cleanup = () => {
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       server.stop(true);
-      reject(new Error("OAuth timed out after 5 minutes."));
+    };
+
+    const finishReject = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      cleanup();
+      reject(error);
+    };
+
+    const finishResolve = (code: string) => {
+      if (settled) {
+        return;
+      }
+      cleanup();
+      resolve(code);
+    };
+
+    const onAbort = () => {
+      finishReject(new DOMException("OAuth cancelled.", "AbortError"));
+    };
+
+    const timer = setTimeout(() => {
+      finishReject(new Error("OAuth timed out after 5 minutes."));
     }, timeoutMs);
 
     const server = Bun.serve({
@@ -384,20 +413,17 @@ async function waitForAuthorizationCode(
         const code = url.searchParams.get("code");
         const error = url.searchParams.get("error");
 
-        clearTimeout(timer);
-        server.stop(true);
-
         if (error) {
-          reject(new Error(`OAuth failed: ${error}`));
+          finishReject(new Error(`OAuth failed: ${error}`));
           return new Response("Authentication failed. Return to the terminal.");
         }
 
         if (!code || state !== expectedState) {
-          reject(new Error("OAuth callback was missing code or state."));
+          finishReject(new Error("OAuth callback was missing code or state."));
           return new Response("Invalid callback. Return to the terminal.");
         }
 
-        resolve(code);
+        finishResolve(code);
 
         return new Response(
           "Authentication complete. You can close this tab and return to the terminal.",
@@ -410,6 +436,7 @@ async function waitForAuthorizationCode(
       },
     });
 
+    signal?.addEventListener("abort", onAbort, { once: true });
     log(`Waiting for OAuth callback on ${redirectUri}`);
   });
 }
@@ -506,7 +533,11 @@ export async function refreshAccessToken(
 }
 
 export async function authenticateGoogleWorkspace(
-  log: (message: string) => void
+  log: (message: string) => void,
+  options?: {
+    signal?: AbortSignal;
+    onAuthorizationUrl?: (url: string) => void;
+  }
 ): Promise<ConnectorRecord> {
   log(`Discovering OAuth metadata from ${env.googleWorkspaceMcpUrl} ...`);
 
@@ -530,14 +561,15 @@ export async function authenticateGoogleWorkspace(
   );
   const authRequest = buildAuthorizationUrl(metadata, env.oauthRedirectUri);
 
-  log("Open this URL in your browser to connect Google Workspace:");
-  log(authRequest.url);
+  options?.onAuthorizationUrl?.(authRequest.url);
+  log("Authorization URL prepared.");
 
   await delay(50);
   const code = await waitForAuthorizationCode(
     env.oauthRedirectUri,
     authRequest.state,
-    log
+    log,
+    options?.signal
   );
   const tokens = await exchangeCodeForTokens(
     code,

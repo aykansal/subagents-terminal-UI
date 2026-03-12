@@ -1,5 +1,6 @@
 import { createCliRenderer, TextAttributes } from "@opentui/core";
-import { createRoot, useKeyboard } from "@opentui/react";
+import { createRoot, useKeyboard, useRenderer } from "@opentui/react";
+import { execFileSync } from "node:child_process";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { buildMainAgent } from "./lib/agents";
 import { deleteConnectorRecord, getDbPath } from "./lib/db";
@@ -18,6 +19,9 @@ type TranscriptEntry = {
   tools?: string[];
   usage?: string;
   details?: string[];
+  actionLabel?: string;
+  actionValue?: string;
+  actionStatus?: string;
   createdAt: string;
 };
 
@@ -67,7 +71,33 @@ function formatUsage(part: {
   return `finish=${part.finishReason} in=${inputTokens} out=${outputTokens} reasoning=${reasoningTokens}`;
 }
 
+function copyWithSystemClipboard(text: string): boolean {
+  const attempts: Array<[string, string[]]> = [];
+
+  if (process.platform === "win32") {
+    attempts.push(["clip.exe", []], ["cmd.exe", ["/c", "clip"]]);
+  } else {
+    attempts.push(
+      ["/mnt/c/Windows/System32/clip.exe", []],
+      ["clip.exe", []],
+      ["cmd.exe", ["/c", "clip"]]
+    );
+  }
+
+  for (const [command, args] of attempts) {
+    try {
+      execFileSync(command, args, { input: text });
+      return true;
+    } catch {
+      continue;
+    }
+  }
+
+  return false;
+}
+
 function App() {
+  const tuiRenderer = useRenderer();
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([
     {
       id: makeId(),
@@ -87,6 +117,7 @@ function App() {
     {}
   );
   const abortControllerRef = useRef<AbortController | null>(null);
+  const oauthAbortControllerRef = useRef<AbortController | null>(null);
 
   const appendTranscript = (
     entry: Omit<TranscriptEntry, "id" | "createdAt">
@@ -109,6 +140,31 @@ function App() {
   ) => {
     setTranscript((current) =>
       current.map((entry) => (entry.id === id ? updater(entry) : entry))
+    );
+  };
+
+  const setActionStatus = (id: string, actionStatus: string) => {
+    setTranscript((current) =>
+      current.map((entry) =>
+        entry.id === id
+          ? {
+              ...entry,
+              actionStatus,
+            }
+          : entry
+      )
+    );
+  };
+
+  const copyAuthValue = (id: string, value: string) => {
+    const copied =
+      tuiRenderer.copyToClipboardOSC52(value) || copyWithSystemClipboard(value);
+
+    setActionStatus(
+      id,
+      copied
+        ? "Copied. Paste in your browser and sign in with the Google account you want to connect."
+        : "Copy failed in this terminal too. I can add an open-browser fallback next if you want."
     );
   };
 
@@ -155,6 +211,8 @@ function App() {
     if (key.ctrl && key.name === "c") {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
+      } else if (oauthAbortControllerRef.current) {
+        oauthAbortControllerRef.current.abort();
       } else {
         appendTranscript({
           role: "assistant",
@@ -173,6 +231,15 @@ function App() {
           lastAssistant.id,
           !Boolean(expandedEntries[lastAssistant.id])
         );
+      }
+    }
+
+    if (key.ctrl && key.name === "y") {
+      const lastActionable = [...transcript]
+        .reverse()
+        .find((entry) => entry.actionValue);
+      if (lastActionable?.actionValue) {
+        copyAuthValue(lastActionable.id, lastActionable.actionValue);
       }
     }
   });
@@ -204,19 +271,41 @@ function App() {
           title: "AGENT",
           content: "Starting Google Workspace OAuth...",
           details: [],
+          actionLabel: "copy this",
         });
         setExpanded(outputId, true);
         appendDetail(outputId, "Starting terminal OAuth for Google Workspace...");
-        const record = await authenticateGoogleWorkspace((line) =>
-          appendDetail(outputId, line)
-        );
-        setAuthSummary(
-          `Google connected • token DB ${getDbPath()} • updated ${record.updatedAt}`
-        );
-        updateTranscript(outputId, (entry) => ({
-          ...entry,
-          content: "Google Workspace connected successfully.",
-        }));
+        const oauthAbortController = new AbortController();
+        oauthAbortControllerRef.current = oauthAbortController;
+        try {
+          const record = await authenticateGoogleWorkspace(
+            (line) => appendDetail(outputId, line),
+            {
+              signal: oauthAbortController.signal,
+              onAuthorizationUrl: (url) => {
+                updateTranscript(outputId, (entry) => ({
+                  ...entry,
+                  actionValue: url,
+                  actionStatus:
+                    "Preparing clipboard copy...",
+                }));
+                copyAuthValue(outputId, url);
+              },
+            }
+          );
+          setAuthSummary(
+            `Google connected • token DB ${getDbPath()} • updated ${record.updatedAt}`
+          );
+          updateTranscript(outputId, (entry) => ({
+            ...entry,
+            content: "Google Workspace connected successfully.",
+            actionValue: undefined,
+            actionLabel: undefined,
+            actionStatus: undefined,
+          }));
+        } finally {
+          oauthAbortControllerRef.current = null;
+        }
         return;
       }
 
@@ -367,7 +456,10 @@ function App() {
         appendTranscript({
           role: "assistant",
           title: "AGENT",
-          content: "Cancelled the current run.",
+          content:
+            oauthAbortControllerRef.current || !abortControllerRef.current
+              ? "Cancelled the current flow."
+              : "Cancelled the current run.",
         });
       } else {
         appendTranscript({
@@ -471,6 +563,15 @@ function App() {
                           tools: {entry.tools.join(", ")}
                         </text>
                       ) : null}
+                      {entry.actionLabel ? (
+                        <box style={{ flexDirection: "column", marginTop: 1 }}>
+                          <text fg="#93c5fd">[ {entry.actionLabel} ]</text>
+                          <text attributes={TextAttributes.DIM}>
+                            {entry.actionStatus ??
+                              "Press Ctrl+Y to copy this, then paste in your browser with the Google account you want to connect."}
+                          </text>
+                        </box>
+                      ) : null}
                       {entry.details?.map((line, index) => (
                         <text key={`${entry.id}-detail-${index}`}>{line}</text>
                       ))}
@@ -513,7 +614,7 @@ function App() {
         }}
       >
         <text attributes={TextAttributes.DIM}>
-          Enter=send • Tab=toggle latest details • /auth Google • Ctrl+C=cancel • /quit=exit • model=claude-sonnet-4.6 • subagents=research,ops • {lastUsage} • {busy ? "mode=running" : "mode=idle"}
+          Enter=send • Tab=toggle latest details • Ctrl+Y=copy auth link • /auth Google • Ctrl+C=cancel • /quit=exit • model=claude-sonnet-4.6 • subagents=research,ops • {lastUsage} • {busy ? "mode=running" : "mode=idle"}
         </text>
       </box>
     </box>
