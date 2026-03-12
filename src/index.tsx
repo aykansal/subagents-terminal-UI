@@ -8,8 +8,19 @@ import {
 import { execFileSync } from "node:child_process";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { buildMainAgent } from "./lib/agents";
-import { deleteConnectorRecord, getDbPath } from "./lib/db";
+import { deriveChatTitle } from "./lib/chat-utils";
+import {
+  createChatSession,
+  deleteConnectorRecord,
+  getActiveChatSessionId,
+  getChatSession,
+  getDbPath,
+  listChatSessions,
+  saveChatSession,
+  setActiveChatSession,
+} from "./lib/db";
 import { createDirectTools } from "./lib/direct-tools";
+import type { ChatSessionSummary, TranscriptEntry } from "./lib/chat-types";
 import { createGoogleMcpSession, listGoogleMcpTools } from "./lib/mcp";
 import {
   authenticateGoogleWorkspace,
@@ -17,7 +28,6 @@ import {
 } from "./lib/oauth";
 import { AppHeader } from "./ui/AppHeader";
 import { Composer } from "./ui/Composer";
-import { type TranscriptEntry } from "./lib/chat-types";
 import { StatusBar } from "./ui/StatusBar";
 import { TranscriptView } from "./ui/TranscriptView";
 
@@ -51,22 +61,6 @@ function readStreamText(part: unknown): string {
   return "";
 }
 
-function formatUsage(part: {
-  finishReason: string;
-  usage?: {
-    inputTokens?: number;
-    outputTokens?: number;
-    outputTokenDetails?: {
-      reasoningTokens?: number;
-    };
-  };
-}) {
-  const inputTokens = part.usage?.inputTokens ?? 0;
-  const outputTokens = part.usage?.outputTokens ?? 0;
-  const reasoningTokens = part.usage?.outputTokenDetails?.reasoningTokens ?? 0;
-  return `finish=${part.finishReason} in=${inputTokens} out=${outputTokens} reasoning=${reasoningTokens}`;
-}
-
 function copyWithSystemClipboard(text: string): boolean {
   const attempts: Array<[string, string[]]> = [];
 
@@ -92,35 +86,115 @@ function copyWithSystemClipboard(text: string): boolean {
   return false;
 }
 
+function sortChatSummaries(chats: ChatSessionSummary[]) {
+  return [...chats].sort((left, right) =>
+    right.updatedAt.localeCompare(left.updatedAt),
+  );
+}
+
+function summarizeChat(chatId: string, title: string, transcript: TranscriptEntry[]) {
+  const timestamp =
+    transcript[transcript.length - 1]?.createdAt ?? new Date().toISOString();
+
+  return {
+    id: chatId,
+    title,
+    createdAt: transcript[0]?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+    messageCount: transcript.length,
+  } satisfies ChatSessionSummary;
+}
+
 function App() {
   const tuiRenderer = useRenderer();
   const { width } = useTerminalDimensions();
   const directTools = useMemo(() => createDirectTools(), []);
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  const [chatSessions, setChatSessions] = useState<ChatSessionSummary[]>([]);
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [booting, setBooting] = useState(true);
   const [composerKey, setComposerKey] = useState(0);
   const [draft, setDraft] = useState("");
   const [googleConnected, setGoogleConnected] = useState(false);
-  // "Checking saved Google token...",
   const [expandedEntries, setExpandedEntries] = useState<
     Record<string, boolean>
   >({});
   const abortControllerRef = useRef<AbortController | null>(null);
   const oauthAbortControllerRef = useRef<AbortController | null>(null);
   const composerInputRef = useRef<InputRenderable | null>(null);
+  const activeChatIdRef = useRef<string | null>(null);
+  const chatSessionsRef = useRef<ChatSessionSummary[]>([]);
+  const persistQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  const uiBusy = busy || booting || !activeChatId;
+  const activeChatSummary =
+    chatSessions.find((chat) => chat.id === activeChatId) ?? null;
+
+  useEffect(() => {
+    activeChatIdRef.current = activeChatId;
+  }, [activeChatId]);
+
+  useEffect(() => {
+    chatSessionsRef.current = chatSessions;
+  }, [chatSessions]);
+
+  const queuePersist = (
+    chatId: string,
+    title: string,
+    nextTranscript: TranscriptEntry[],
+  ) => {
+    persistQueueRef.current = persistQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        await saveChatSession({
+          id: chatId,
+          title,
+          transcript: nextTranscript,
+        });
+      })
+      .catch((error) => {
+        console.error("Failed to persist chat session", error);
+      });
+  };
+
+  const syncActiveChat = (nextTranscript: TranscriptEntry[], chatId?: string) => {
+    const resolvedChatId = chatId ?? activeChatIdRef.current;
+    if (!resolvedChatId) {
+      return;
+    }
+
+    const existing = chatSessionsRef.current.find(
+      (chat) => chat.id === resolvedChatId,
+    );
+    const title = deriveChatTitle(nextTranscript, existing?.title ?? "New chat");
+    const nextSummary = summarizeChat(resolvedChatId, title, nextTranscript);
+
+    setChatSessions((current) =>
+      sortChatSummaries([
+        nextSummary,
+        ...current.filter((chat) => chat.id !== resolvedChatId),
+      ]),
+    );
+
+    queuePersist(resolvedChatId, title, nextTranscript);
+  };
 
   const appendTranscript = (
     entry: Omit<TranscriptEntry, "id" | "createdAt">,
   ): string => {
     const id = makeId();
-    setTranscript((current) => [
-      ...current,
-      {
-        ...entry,
-        id,
-        createdAt: new Date().toISOString(),
-      },
-    ]);
+    const nextEntry: TranscriptEntry = {
+      ...entry,
+      id,
+      createdAt: new Date().toISOString(),
+    };
+
+    setTranscript((current) => {
+      const nextTranscript = [...current, nextEntry];
+      syncActiveChat(nextTranscript);
+      return nextTranscript;
+    });
     return id;
   };
 
@@ -128,22 +202,28 @@ function App() {
     id: string,
     updater: (entry: TranscriptEntry) => TranscriptEntry,
   ) => {
-    setTranscript((current) =>
-      current.map((entry) => (entry.id === id ? updater(entry) : entry)),
-    );
+    setTranscript((current) => {
+      const nextTranscript = current.map((entry) =>
+        entry.id === id ? updater(entry) : entry,
+      );
+      syncActiveChat(nextTranscript);
+      return nextTranscript;
+    });
   };
 
   const setActionStatus = (id: string, actionStatus: string) => {
-    setTranscript((current) =>
-      current.map((entry) =>
+    setTranscript((current) => {
+      const nextTranscript = current.map((entry) =>
         entry.id === id
           ? {
               ...entry,
               actionStatus,
             }
           : entry,
-      ),
-    );
+      );
+      syncActiveChat(nextTranscript);
+      return nextTranscript;
+    });
   };
 
   const copyAuthValue = (id: string, value: string) => {
@@ -159,16 +239,18 @@ function App() {
   };
 
   const appendDetail = (id: string, line: string) => {
-    setTranscript((current) =>
-      current.map((entry) =>
+    setTranscript((current) => {
+      const nextTranscript = current.map((entry) =>
         entry.id === id
           ? {
               ...entry,
               details: [...(entry.details ?? []), line].slice(-24),
             }
           : entry,
-      ),
-    );
+      );
+      syncActiveChat(nextTranscript);
+      return nextTranscript;
+    });
   };
 
   const setExpanded = (id: string, value: boolean) => {
@@ -186,19 +268,124 @@ function App() {
   };
 
   const focusComposer = () => {
-    if (!busy) {
+    if (!uiBusy) {
       composerInputRef.current?.focus();
     }
+  };
+
+  const resetComposer = () => {
+    setDraft("");
+    setComposerKey((current) => current + 1);
+  };
+
+  const createNewChat = async () => {
+    if (busy) {
+      return;
+    }
+
+    const chatId = makeId();
+    const chat = await createChatSession({
+      id: chatId,
+      title: "New chat",
+      transcript: [],
+      makeActive: true,
+    });
+
+    activeChatIdRef.current = chatId;
+    setActiveChatId(chatId);
+    setTranscript([]);
+    setExpandedEntries({});
+    resetComposer();
+    setChatSessions((current) =>
+      sortChatSummaries([
+        {
+          id: chat.id,
+          title: chat.title,
+          createdAt: chat.createdAt,
+          updatedAt: chat.updatedAt,
+          messageCount: 0,
+        },
+        ...current.filter((entry) => entry.id !== chat.id),
+      ]),
+    );
+  };
+
+  const switchChat = async (chatId: string) => {
+    if (busy || chatId === activeChatIdRef.current) {
+      return;
+    }
+
+    const chat = await getChatSession(chatId);
+    if (!chat) {
+      return;
+    }
+
+    await setActiveChatSession(chatId);
+    activeChatIdRef.current = chatId;
+    setActiveChatId(chatId);
+    setTranscript(chat.transcript);
+    setExpandedEntries({});
+    resetComposer();
   };
 
   useEffect(() => {
     let cancelled = false;
 
     void (async () => {
-      const record = await getGoogleConnectorRecord();
-      if (!cancelled) {
-        setGoogleConnected(Boolean(record));
+      const [savedActiveChatId, summaries, record] = await Promise.all([
+        getActiveChatSessionId(),
+        listChatSessions(),
+        getGoogleConnectorRecord(),
+      ]);
+
+      if (cancelled) {
+        return;
       }
+
+      setGoogleConnected(Boolean(record));
+
+      const initialActiveChatId = savedActiveChatId ?? summaries[0]?.id ?? null;
+      const initialActiveChat = initialActiveChatId
+        ? await getChatSession(initialActiveChatId)
+        : null;
+
+      if (cancelled) {
+        return;
+      }
+
+      if (initialActiveChat) {
+        setChatSessions(summaries);
+        activeChatIdRef.current = initialActiveChat.id;
+        setActiveChatId(initialActiveChat.id);
+        setTranscript(initialActiveChat.transcript);
+      } else {
+        const chatId = makeId();
+        const chat = await createChatSession({
+          id: chatId,
+          title: "New chat",
+          transcript: [],
+          makeActive: true,
+        });
+
+        if (cancelled) {
+          return;
+        }
+
+        setChatSessions([
+          {
+            id: chat.id,
+            title: chat.title,
+            createdAt: chat.createdAt,
+            updatedAt: chat.updatedAt,
+            messageCount: 0,
+          },
+        ]);
+        activeChatIdRef.current = chat.id;
+        setActiveChatId(chat.id);
+        setTranscript([]);
+      }
+
+      setBooting(false);
     })();
 
     return () => {
@@ -208,7 +395,7 @@ function App() {
 
   useEffect(() => {
     focusComposer();
-  }, [busy, composerKey]);
+  }, [composerKey, uiBusy]);
 
   useKeyboard((key) => {
     if (key.name === "tab") {
@@ -231,6 +418,10 @@ function App() {
         copyAuthValue(lastActionable.id, lastActionable.actionValue);
       }
     }
+
+    if (key.ctrl && key.name === "n") {
+      void createNewChat();
+    }
   });
 
   const visibleTranscript = useMemo(() => transcript.slice(-16), [transcript]);
@@ -238,7 +429,7 @@ function App() {
 
   const runPrompt = async (input: string) => {
     const trimmed = input.trim();
-    if (!trimmed || busy) {
+    if (!trimmed || uiBusy) {
       return;
     }
 
@@ -247,9 +438,13 @@ function App() {
       return;
     }
 
+    if (trimmed === "/new") {
+      await createNewChat();
+      return;
+    }
+
     setBusy(true);
-    setDraft("");
-    setComposerKey((current) => current + 1);
+    resetComposer();
     appendTranscript({
       role: "user",
       title: "YOU",
@@ -427,11 +622,9 @@ function App() {
                 }`,
               );
               break;
-            case "finish": {
-              updateTranscript(outputId, (entry) => ({...entry}));
-              appendDetail(outputId, `Turn finished`);
+            case "finish":
+              appendDetail(outputId, "Turn finished");
               break;
-            }
           }
         }
 
@@ -472,16 +665,26 @@ function App() {
         paddingRight: 1,
       }}
     >
-      <AppHeader divider={divider} />
+      <AppHeader
+        activeChatId={activeChatId}
+        chats={chatSessions}
+        divider={divider}
+        onCreateChat={() => {
+          void createNewChat();
+        }}
+        onSelectChat={(chatId) => {
+          void switchChat(chatId);
+        }}
+      />
       <TranscriptView
-        busy={busy}
+        busy={uiBusy}
         divider={divider}
         entries={visibleTranscript}
         expandedEntries={expandedEntries}
         onToggleExpanded={toggleExpanded}
       />
       <Composer
-        busy={busy}
+        busy={uiBusy}
         composerKey={composerKey}
         divider={divider}
         draft={draft}
@@ -492,8 +695,10 @@ function App() {
         }}
       />
       <StatusBar
+        activeChatLabel={activeChatSummary?.title ?? "New chat"}
+        busy={uiBusy}
+        chatCount={chatSessions.length}
         dbPath={getDbPath()}
-        busy={busy}
         googleConnected={googleConnected}
       />
     </box>

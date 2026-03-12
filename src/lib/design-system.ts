@@ -17,7 +17,7 @@ export const uiSpacing = {
 } as const;
 
 export const uiLayout = {
-  headerHeight: 5,
+  headerHeight: 7,
   composerHeight: 4,
   statusHeight: 4,
 } as const;
@@ -29,5 +29,5 @@ export const uiCopy = {
   authCopyHint:
     "Press Ctrl+Y to copy this, then paste it into your browser with the Google account you want to connect.",
   statusCommands:
-    "Enter:Send • Ctrl+C:Abort • /auth • /tools • /reset-auth • /quit",
+    "Enter:Send • Ctrl+C:Abort • Ctrl+N:/new • /auth • /tools • /reset-auth • /quit",
 } as const;

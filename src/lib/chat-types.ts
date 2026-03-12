@@ -12,3 +12,15 @@ export type TranscriptEntry = {
   actionStatus?: string;
   createdAt: string;
 };
+
+export type ChatSessionSummary = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+};
+
+export type ChatSessionRecord = ChatSessionSummary & {
+  transcript: TranscriptEntry[];
+};

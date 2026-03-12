@@ -2,13 +2,17 @@ import { TextAttributes } from "@opentui/core";
 import { uiColors, uiCopy, uiLayout } from "../lib/design-system";
 
 type StatusBarProps = {
+  activeChatLabel: string;
   busy: boolean;
+  chatCount: number;
   dbPath: string;
   googleConnected: boolean;
 };
 
 export function StatusBar({
+  activeChatLabel,
   busy,
+  chatCount,
   dbPath,
   googleConnected,
 }: StatusBarProps) {
@@ -36,7 +40,7 @@ export function StatusBar({
           ● 
         </text>
         <text fg={uiColors.subtle} attributes={TextAttributes.DIM}>
-          Google • DB: {dbPath}
+          Google • Chats: {chatCount} • Active: {activeChatLabel} • DB: {dbPath}
         </text>
       </box>
     </box>
