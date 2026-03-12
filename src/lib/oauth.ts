@@ -396,7 +396,9 @@ function startAuthorizationCallbackListener(
     };
 
     const onAbort = () => {
-      finishReject(new DOMException("OAuth cancelled.", "AbortError"));
+      const err = new Error("OAuth cancelled.");
+      err.name = "AbortError";
+      finishReject(err);
     };
 
     const timer = setTimeout(() => {
@@ -526,9 +528,10 @@ export async function refreshAccessToken(
     throw new Error(`Token refresh failed: ${errorText}`);
   }
 
+  const body = await response.json();
   const nextTokens = {
     ...tokens,
-    ...(await response.json()),
+    ...(typeof body === "object" && body !== null ? body : {}),
   } as OAuthTokens;
 
   if (typeof nextTokens.expires_in === "number") {

@@ -7,8 +7,12 @@ import {
 } from "@opentui/react";
 import { execFileSync } from "node:child_process";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { buildMainAgent } from "./lib/agents";
-import { deriveChatTitle } from "./lib/chat-utils";
+import { buildMainAgent, type AgentStatusEvent } from "./lib/agents";
+import {
+  deriveChatTitle,
+  formatStructuredValue,
+  getMessageTextContent,
+} from "./lib/chat-utils";
 import {
   createChatSession,
   deleteConnectorRecord,
@@ -20,7 +24,13 @@ import {
   setActiveChatSession,
 } from "./lib/db";
 import { createDirectTools } from "./lib/direct-tools";
-import type { ChatSessionSummary, TranscriptEntry } from "./lib/chat-types";
+import type {
+  ChatMessage,
+  ChatSessionSummary,
+  DataOAuthPart,
+  DataTracePart,
+  MessagePart,
+} from "./lib/chat-types";
 import { createGoogleMcpSession, listGoogleMcpTools } from "./lib/mcp";
 import {
   authenticateGoogleWorkspace,
@@ -33,14 +43,6 @@ import { TranscriptView } from "./ui/TranscriptView";
 
 function makeId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function trimBlock(value: string, maxChars = 2200) {
-  if (value.length <= maxChars) {
-    return value;
-  }
-
-  return `${value.slice(value.length - maxChars)}\n[truncated]`;
 }
 
 function readStreamText(part: unknown): string {
@@ -92,7 +94,7 @@ function sortChatSummaries(chats: ChatSessionSummary[]) {
   );
 }
 
-function summarizeChat(chatId: string, title: string, transcript: TranscriptEntry[]) {
+function summarizeChat(chatId: string, title: string, transcript: ChatMessage[]) {
   const timestamp =
     transcript[transcript.length - 1]?.createdAt ?? new Date().toISOString();
 
@@ -105,11 +107,30 @@ function summarizeChat(chatId: string, title: string, transcript: TranscriptEntr
   } satisfies ChatSessionSummary;
 }
 
+type OutputActivityContext = {
+  toolEventIdsByCallId: Record<string, string>;
+  activeSubagentTraceIdsByAgent: Record<string, string[]>;
+};
+
+function createOutputActivityContext(): OutputActivityContext {
+  return {
+    toolEventIdsByCallId: {},
+    activeSubagentTraceIdsByAgent: {},
+  };
+}
+
+function getOAuthFromMessage(msg: ChatMessage): DataOAuthPart["data"] | null {
+  const part = msg.parts?.find((p) => p.type === "data-oauth") as
+    | DataOAuthPart
+    | undefined;
+  return part ? part.data : null;
+}
+
 function App() {
   const tuiRenderer = useRenderer();
   const { width } = useTerminalDimensions();
   const directTools = useMemo(() => createDirectTools(), []);
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  const [transcript, setTranscript] = useState<ChatMessage[]>([]);
   const [chatSessions, setChatSessions] = useState<ChatSessionSummary[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -120,12 +141,16 @@ function App() {
   const [expandedEntries, setExpandedEntries] = useState<
     Record<string, boolean>
   >({});
+  const [collapsedActivityNodes, setCollapsedActivityNodes] = useState<
+    Record<string, boolean>
+  >({});
   const abortControllerRef = useRef<AbortController | null>(null);
   const oauthAbortControllerRef = useRef<AbortController | null>(null);
   const composerInputRef = useRef<InputRenderable | null>(null);
   const activeChatIdRef = useRef<string | null>(null);
   const chatSessionsRef = useRef<ChatSessionSummary[]>([]);
   const persistQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const activityContextRef = useRef<Record<string, OutputActivityContext>>({});
 
   const uiBusy = busy || booting || !activeChatId;
   const activeChatSummary =
@@ -142,7 +167,7 @@ function App() {
   const queuePersist = (
     chatId: string,
     title: string,
-    nextTranscript: TranscriptEntry[],
+    nextTranscript: ChatMessage[],
   ) => {
     persistQueueRef.current = persistQueueRef.current
       .catch(() => undefined)
@@ -158,7 +183,7 @@ function App() {
       });
   };
 
-  const syncActiveChat = (nextTranscript: TranscriptEntry[], chatId?: string) => {
+  const syncActiveChat = (nextTranscript: ChatMessage[], chatId?: string) => {
     const resolvedChatId = chatId ?? activeChatIdRef.current;
     if (!resolvedChatId) {
       return;
@@ -181,10 +206,10 @@ function App() {
   };
 
   const appendTranscript = (
-    entry: Omit<TranscriptEntry, "id" | "createdAt">,
+    entry: Omit<ChatMessage, "id" | "createdAt">,
   ): string => {
     const id = makeId();
-    const nextEntry: TranscriptEntry = {
+    const nextEntry: ChatMessage = {
       ...entry,
       id,
       createdAt: new Date().toISOString(),
@@ -200,7 +225,7 @@ function App() {
 
   const updateTranscript = (
     id: string,
-    updater: (entry: TranscriptEntry) => TranscriptEntry,
+    updater: (entry: ChatMessage) => ChatMessage,
   ) => {
     setTranscript((current) => {
       const nextTranscript = current.map((entry) =>
@@ -211,18 +236,40 @@ function App() {
     });
   };
 
+  const appendMessagePart = (id: string, part: MessagePart) => {
+    updateTranscript(id, (msg) => ({
+      ...msg,
+      parts: [...(msg.parts ?? []), part],
+    }));
+  };
+
+  const updateMessagePart = (
+    id: string,
+    matcher: (part: MessagePart) => boolean,
+    updater: (part: MessagePart) => MessagePart,
+  ) => {
+    updateTranscript(id, (msg) => ({
+      ...msg,
+      parts: (msg.parts ?? []).map((part) => (matcher(part) ? updater(part) : part)),
+    }));
+  };
+
   const setActionStatus = (id: string, actionStatus: string) => {
-    setTranscript((current) => {
-      const nextTranscript = current.map((entry) =>
-        entry.id === id
-          ? {
-              ...entry,
-              actionStatus,
-            }
-          : entry,
-      );
-      syncActiveChat(nextTranscript);
-      return nextTranscript;
+    updateTranscript(id, (msg) => {
+      const parts: MessagePart[] = [...(msg.parts ?? [])];
+      const oauthPart = parts.find((p) => p.type === "data-oauth") as
+        | DataOAuthPart
+        | undefined;
+      const data: DataOAuthPart["data"] = oauthPart
+        ? { ...oauthPart.data, actionStatus }
+        : { actionStatus };
+      if (oauthPart) {
+        const idx = parts.indexOf(oauthPart);
+        if (idx >= 0) parts[idx] = { type: "data-oauth", data };
+      } else {
+        parts.push({ type: "data-oauth", data });
+      }
+      return { ...msg, parts };
     });
   };
 
@@ -238,18 +285,150 @@ function App() {
     );
   };
 
+  const ensureActivityContext = (id: string) => {
+    const existing = activityContextRef.current[id];
+    if (existing) {
+      return existing;
+    }
+
+    const next = createOutputActivityContext();
+    activityContextRef.current[id] = next;
+    return next;
+  };
+
+  const handleAgentStatusEvent = (id: string, event: AgentStatusEvent) => {
+    const context = ensureActivityContext(id);
+
+    const getActiveSubagentTraceId = (agent: string) => {
+      const stack = context.activeSubagentTraceIdsByAgent[agent] ?? [];
+      return stack[stack.length - 1];
+    };
+
+    switch (event.type) {
+      case "delegate-start": {
+        const traceId = makeId();
+        const stack = context.activeSubagentTraceIdsByAgent[event.agent] ?? [];
+        context.activeSubagentTraceIdsByAgent[event.agent] = [...stack, traceId];
+        appendMessagePart(id, {
+          type: "data-trace",
+          data: {
+            id: traceId,
+            label: `${event.agent} subagent`,
+            content: event.task,
+            tone: "action",
+            state: "running",
+          },
+        });
+        return;
+      }
+      case "delegate-finish": {
+        const traceId = getActiveSubagentTraceId(event.agent);
+        if (!traceId) {
+          return;
+        }
+
+        updateMessagePart(
+          id,
+          (part) => part.type === "data-trace" && part.data.id === traceId,
+          (part) =>
+            part.type === "data-trace"
+              ? {
+                  ...part,
+                  data: {
+                    ...part.data,
+                    state: "done",
+                  },
+                }
+              : part,
+        );
+        appendMessagePart(id, {
+          type: "data-trace",
+          data: {
+            id: makeId(),
+            parentId: traceId,
+            label: `${event.agent} response`,
+            content: event.summary,
+            tone: "muted",
+            state: "done",
+          },
+        });
+        context.activeSubagentTraceIdsByAgent[event.agent] = (
+          context.activeSubagentTraceIdsByAgent[event.agent] ?? []
+        ).slice(0, -1);
+        return;
+      }
+      case "step-finish": {
+        const parentId = getActiveSubagentTraceId(event.agent);
+        appendMessagePart(id, {
+          type: "data-trace",
+          data: {
+            id: makeId(),
+            parentId,
+            label: `${event.agent} step`,
+            content: event.text,
+            tone: "muted",
+            state: "done",
+          },
+        });
+        return;
+      }
+      case "tool-start": {
+        const partId = `subagent:${event.agent}:${event.toolCallId}`;
+        context.toolEventIdsByCallId[partId] = partId;
+        const parentTraceId = getActiveSubagentTraceId(event.agent);
+        appendMessagePart(id, {
+          type: "tool-invocation",
+          toolInvocation: {
+            toolCallId: partId,
+            toolName: `${event.agent} · ${event.toolName}`,
+            parentTraceId,
+            args: event.input,
+            state: "call",
+          },
+        });
+        return;
+      }
+      case "tool-finish": {
+        const partId = `subagent:${event.agent}:${event.toolCallId}`;
+        updateMessagePart(
+          id,
+          (part) =>
+            part.type === "tool-invocation" &&
+            part.toolInvocation.toolCallId === partId,
+          (part) =>
+            part.type === "tool-invocation"
+              ? {
+                  ...part,
+                  toolInvocation: {
+                    ...part.toolInvocation,
+                    result: event.success ? event.output : event.error,
+                    state: "result",
+                  },
+                }
+              : part,
+        );
+        return;
+      }
+    }
+  };
+
   const appendDetail = (id: string, line: string) => {
-    setTranscript((current) => {
-      const nextTranscript = current.map((entry) =>
-        entry.id === id
-          ? {
-              ...entry,
-              details: [...(entry.details ?? []), line].slice(-24),
-            }
-          : entry,
+    updateTranscript(id, (msg) => {
+      const parts: MessagePart[] = [...(msg.parts ?? [])];
+      const detailsPart = parts.find(
+        (p): p is Extract<MessagePart, { type: "data-details" }> =>
+          p.type === "data-details",
       );
-      syncActiveChat(nextTranscript);
-      return nextTranscript;
+      const nextLines = detailsPart
+        ? [...detailsPart.data, line].slice(-24)
+        : [line];
+      if (detailsPart) {
+        const idx = parts.indexOf(detailsPart);
+        if (idx >= 0) parts[idx] = { type: "data-details", data: nextLines };
+      } else {
+        parts.push({ type: "data-details", data: nextLines });
+      }
+      return { ...msg, parts };
     });
   };
 
@@ -262,6 +441,13 @@ function App() {
 
   const toggleExpanded = (id: string) => {
     setExpandedEntries((current) => ({
+      ...current,
+      [id]: !current[id],
+    }));
+  };
+
+  const toggleActivityNode = (id: string) => {
+    setCollapsedActivityNodes((current) => ({
       ...current,
       [id]: !current[id],
     }));
@@ -294,7 +480,9 @@ function App() {
     activeChatIdRef.current = chatId;
     setActiveChatId(chatId);
     setTranscript([]);
+    activityContextRef.current = {};
     setExpandedEntries({});
+    setCollapsedActivityNodes({});
     resetComposer();
     setChatSessions((current) =>
       sortChatSummaries([
@@ -324,7 +512,9 @@ function App() {
     activeChatIdRef.current = chatId;
     setActiveChatId(chatId);
     setTranscript(chat.transcript);
+    activityContextRef.current = {};
     setExpandedEntries({});
+    setCollapsedActivityNodes({});
     resetComposer();
   };
 
@@ -358,6 +548,8 @@ function App() {
         activeChatIdRef.current = initialActiveChat.id;
         setActiveChatId(initialActiveChat.id);
         setTranscript(initialActiveChat.transcript);
+        activityContextRef.current = {};
+        setCollapsedActivityNodes({});
       } else {
         const chatId = makeId();
         const chat = await createChatSession({
@@ -383,6 +575,8 @@ function App() {
         activeChatIdRef.current = chat.id;
         setActiveChatId(chat.id);
         setTranscript([]);
+        activityContextRef.current = {};
+        setCollapsedActivityNodes({});
       }
 
       setBooting(false);
@@ -413,9 +607,10 @@ function App() {
     if (key.ctrl && key.name === "y") {
       const lastActionable = [...transcript]
         .reverse()
-        .find((entry) => entry.actionValue);
-      if (lastActionable?.actionValue) {
-        copyAuthValue(lastActionable.id, lastActionable.actionValue);
+        .find((m) => getOAuthFromMessage(m)?.actionValue);
+      const oauth = lastActionable && getOAuthFromMessage(lastActionable);
+      if (lastActionable && oauth?.actionValue) {
+        copyAuthValue(lastActionable.id, oauth.actionValue);
       }
     }
 
@@ -447,18 +642,18 @@ function App() {
     resetComposer();
     appendTranscript({
       role: "user",
-      title: "YOU",
-      content: trimmed,
+      parts: [{ type: "text", text: trimmed }],
     });
 
     try {
       if (trimmed === "/auth") {
         const outputId = appendTranscript({
           role: "assistant",
-          title: "AGENT",
-          content: "Starting Google Workspace OAuth...",
-          details: [],
-          actionLabel: "copy this",
+          parts: [
+            { type: "text", text: "Starting Google Workspace OAuth..." },
+            { type: "data-oauth", data: { actionLabel: "copy this" } },
+            { type: "data-details", data: [] },
+          ],
         });
         setExpanded(outputId, true);
         appendDetail(
@@ -473,23 +668,42 @@ function App() {
             {
               signal: oauthAbortController.signal,
               onAuthorizationUrl: (url) => {
-                updateTranscript(outputId, (entry) => ({
-                  ...entry,
-                  actionValue: url,
-                  actionStatus: "Preparing clipboard copy...",
-                }));
+          updateTranscript(outputId, (msg) => {
+            const parts: MessagePart[] = msg.parts?.slice() ?? [];
+            const oauthPart = parts.find((p) => p.type === "data-oauth") as
+              | DataOAuthPart
+              | undefined;
+            const data = {
+              actionLabel: "copy this",
+              actionValue: url,
+              actionStatus: "Preparing clipboard copy...",
+            };
+            if (oauthPart) {
+              const idx = parts.indexOf(oauthPart);
+              if (idx >= 0) parts[idx] = { type: "data-oauth", data };
+            } else {
+              parts.push({ type: "data-oauth", data });
+            }
+            return { ...msg, parts };
+          });
                 copyAuthValue(outputId, url);
               },
             },
           );
           setGoogleConnected(true);
-          updateTranscript(outputId, (entry) => ({
-            ...entry,
-            content: "Google Workspace connected successfully.",
-            actionValue: undefined,
-            actionLabel: undefined,
-            actionStatus: undefined,
-          }));
+          updateTranscript(outputId, (msg) => {
+            const rest = (msg.parts ?? []).filter(
+              (p): p is Extract<MessagePart, { type: "data-details" }> =>
+                p.type === "data-details",
+            );
+            return {
+              ...msg,
+              parts: [
+                { type: "text", text: "Google Workspace connected successfully." },
+                ...rest,
+              ],
+            };
+          });
         } finally {
           oauthAbortControllerRef.current = null;
         }
@@ -499,9 +713,10 @@ function App() {
       if (trimmed === "/tools") {
         const outputId = appendTranscript({
           role: "assistant",
-          title: "AGENT",
-          content: "Loading direct tools and Google MCP tools...",
-          details: [],
+          parts: [
+            { type: "text", text: "Loading direct tools and Google MCP tools..." },
+            { type: "data-details", data: [] },
+          ],
         });
         const directToolNames = Object.keys(directTools).sort();
         const record = await getGoogleConnectorRecord((line) =>
@@ -509,37 +724,40 @@ function App() {
         );
 
         if (!record) {
-          updateTranscript(outputId, (entry) => ({
-            ...entry,
-            content: [
-              "Direct tools:",
-              ...directToolNames.map((toolName) => `- ${toolName}`),
-              "",
-              "Google MCP tools:",
-              "- Not connected. Run /auth first.",
-            ].join("\n"),
-          }));
+          updateTranscript(outputId, (msg) => {
+            const text =
+              "Direct tools:\n" +
+              directToolNames.map((n) => `- ${n}`).join("\n") +
+              "\n\nGoogle MCP tools:\n- Not connected. Run /auth first.";
+            const parts: MessagePart[] = (msg.parts ?? []).filter(
+              (p) => p.type !== "text",
+            );
+            parts.unshift({ type: "text", text });
+            return { ...msg, parts };
+          });
           setGoogleConnected(false);
           return;
         }
 
         const tools = await listGoogleMcpTools(record);
-        updateTranscript(outputId, (entry) => ({
-          ...entry,
-          content: [
-            "Direct tools:",
-            ...directToolNames.map((toolName) => `- ${toolName}`),
-            "",
-            "Google MCP tools:",
-            ...(tools.length === 0
-              ? ["- The Google MCP returned no tools."]
-              : tools.map((toolInfo) =>
-                  toolInfo.description
-                    ? `- ${toolInfo.name}: ${toolInfo.description}`
-                    : `- ${toolInfo.name}`,
-                )),
-          ].join("\n"),
-        }));
+        const text =
+          "Direct tools:\n" +
+          directToolNames.map((n) => `- ${n}`).join("\n") +
+          "\n\nGoogle MCP tools:\n" +
+          (tools.length === 0
+            ? "- The Google MCP returned no tools."
+            : tools
+                .map((t) =>
+                  t.description ? `- ${t.name}: ${t.description}` : `- ${t.name}`,
+                )
+                .join("\n"));
+        updateTranscript(outputId, (msg) => {
+          const parts: MessagePart[] = (msg.parts ?? []).filter(
+            (p) => p.type !== "text",
+          );
+          parts.unshift({ type: "text", text });
+          return { ...msg, parts };
+        });
         setGoogleConnected(true);
         return;
       }
@@ -549,20 +767,22 @@ function App() {
         setGoogleConnected(false);
         appendTranscript({
           role: "assistant",
-          title: "AGENT",
-          content: "Deleted the saved Google Workspace token.",
+          parts: [
+            {
+              type: "text",
+              text: "Deleted the saved Google Workspace token.",
+            },
+          ],
         });
         return;
       }
 
       const outputId = appendTranscript({
         role: "assistant",
-        title: "AGENT",
-        content: "",
-        reasoning: "",
-        tools: [],
-        details: [],
+        parts: [],
       });
+      activityContextRef.current[outputId] = createOutputActivityContext();
+      setExpanded(outputId, true);
 
       const record = await getGoogleConnectorRecord((line) =>
         appendDetail(outputId, line),
@@ -575,55 +795,171 @@ function App() {
         const mainAgent = buildMainAgent({
           directTools,
           googleTools: mcpSession?.tools ?? {},
-          emitStatus: (line) => appendDetail(outputId, line),
+          emitStatus: (event) => handleAgentStatusEvent(outputId, event),
         });
 
         const result = await mainAgent.stream({
           prompt: trimmed,
           abortSignal: abortController.signal,
         });
-        appendDetail(outputId, "Streaming assistant response...");
 
         for await (const part of result.fullStream) {
+          const context = ensureActivityContext(outputId);
+
           switch (part.type) {
-            case "text-delta":
-              updateTranscript(outputId, (entry) => ({
-                ...entry,
-                content: entry.content + readStreamText(part),
-              }));
+            case "start-step":
               break;
-            case "reasoning-delta":
-              updateTranscript(outputId, (entry) => ({
-                ...entry,
-                reasoning: trimBlock(
-                  (entry.reasoning ?? "") + readStreamText(part),
-                ),
-              }));
+            case "text-delta": {
+              const delta = readStreamText(part);
+              updateTranscript(outputId, (msg) => {
+                const parts = [...(msg.parts ?? [])];
+                let idx = -1;
+                for (let i = parts.length - 1; i >= 0; i--) {
+                  if (parts[i]?.type === "text") {
+                    idx = i;
+                    break;
+                  }
+                }
+                const current = idx >= 0 ? parts[idx] : undefined;
+                if (current && current.type === "text") {
+                  parts[idx] = { type: "text", text: current.text + delta };
+                } else {
+                  parts.push({ type: "text", text: delta });
+                }
+                return { ...msg, parts };
+              });
               break;
-            case "tool-call":
-              appendDetail(outputId, `Tool call • ${part.toolName}`);
-              updateTranscript(outputId, (entry) => ({
-                ...entry,
-                tools: entry.tools?.includes(part.toolName)
-                  ? entry.tools
-                  : [...(entry.tools ?? []), part.toolName],
-              }));
+            }
+            case "reasoning-delta": {
+              const delta = readStreamText(part);
+              updateTranscript(outputId, (msg) => {
+                const parts = [...(msg.parts ?? [])];
+                const idx = parts.findIndex((p) => p.type === "reasoning");
+                if (idx >= 0 && parts[idx]?.type === "reasoning") {
+                  parts[idx] = {
+                    type: "reasoning",
+                    reasoning: parts[idx].reasoning + delta,
+                  };
+                } else {
+                  parts.push({ type: "reasoning", reasoning: delta });
+                }
+                return { ...msg, parts };
+              });
               break;
-            case "tool-result":
-              appendDetail(outputId, `Tool finished • ${part.toolName}`);
+            }
+            case "reasoning-end":
+            case "text-end":
               break;
-            case "error":
-              appendDetail(
+            case "tool-input-start":
+              if (!context.toolEventIdsByCallId[part.id]) {
+                context.toolEventIdsByCallId[part.id] = part.id;
+                appendMessagePart(outputId, {
+                  type: "tool-invocation",
+                  toolInvocation: {
+                    toolCallId: part.id,
+                    toolName: part.toolName,
+                    args: "",
+                    state: "partial-call",
+                  },
+                });
+              }
+              break;
+            case "tool-input-delta":
+              updateMessagePart(
                 outputId,
-                `Stream error • ${
-                  part.error instanceof Error
-                    ? part.error.message
-                    : String(part.error)
-                }`,
+                (entryPart) =>
+                  entryPart.type === "tool-invocation" &&
+                  entryPart.toolInvocation.toolCallId === part.id,
+                (entryPart) =>
+                  entryPart.type === "tool-invocation"
+                    ? {
+                        ...entryPart,
+                        toolInvocation: {
+                          ...entryPart.toolInvocation,
+                          args:
+                            typeof entryPart.toolInvocation.args === "string"
+                              ? entryPart.toolInvocation.args + part.delta
+                              : part.delta,
+                          state: "partial-call",
+                        },
+                      }
+                    : entryPart,
               );
               break;
+            case "tool-call":
+              if (!context.toolEventIdsByCallId[part.toolCallId]) {
+                appendMessagePart(outputId, {
+                  type: "tool-invocation",
+                  toolInvocation: {
+                    toolCallId: part.toolCallId,
+                    toolName: part.toolName,
+                    state: "call",
+                    args: part.input,
+                  },
+                });
+                context.toolEventIdsByCallId[part.toolCallId] = part.toolCallId;
+              } else {
+                updateMessagePart(
+                  outputId,
+                  (entryPart) =>
+                    entryPart.type === "tool-invocation" &&
+                    entryPart.toolInvocation.toolCallId === part.toolCallId,
+                  (entryPart) =>
+                    entryPart.type === "tool-invocation"
+                      ? {
+                          ...entryPart,
+                          toolInvocation: {
+                            ...entryPart.toolInvocation,
+                            toolName: part.toolName,
+                            args: part.input,
+                            state: "call",
+                          },
+                        }
+                      : entryPart,
+                );
+              }
+              break;
+            case "tool-result":
+              updateMessagePart(
+                outputId,
+                (entryPart) =>
+                  entryPart.type === "tool-invocation" &&
+                  entryPart.toolInvocation.toolCallId === part.toolCallId,
+                (entryPart) =>
+                  entryPart.type === "tool-invocation"
+                    ? {
+                        ...entryPart,
+                        toolInvocation: {
+                          ...entryPart.toolInvocation,
+                          result: part.output,
+                          state: part.preliminary ? "partial-call" : "result",
+                        },
+                      }
+                    : entryPart,
+              );
+              break;
+            case "tool-error":
+              updateMessagePart(
+                outputId,
+                (entryPart) =>
+                  entryPart.type === "tool-invocation" &&
+                  entryPart.toolInvocation.toolCallId === part.toolCallId,
+                (entryPart) =>
+                  entryPart.type === "tool-invocation"
+                    ? {
+                        ...entryPart,
+                        toolInvocation: {
+                          ...entryPart.toolInvocation,
+                          result: part.error,
+                          state: "result",
+                        },
+                      }
+                    : entryPart,
+              );
+              break;
+            case "finish-step":
+            case "error":
             case "finish":
-              appendDetail(outputId, "Turn finished");
               break;
           }
         }
@@ -637,17 +973,25 @@ function App() {
       if (error instanceof Error && error.name === "AbortError") {
         appendTranscript({
           role: "assistant",
-          title: "AGENT",
-          content:
-            oauthAbortControllerRef.current || !abortControllerRef.current
-              ? "Cancelled the current flow."
-              : "Cancelled the current run.",
+          parts: [
+            {
+              type: "text",
+              text:
+                oauthAbortControllerRef.current || !abortControllerRef.current
+                  ? "Cancelled the current flow."
+                  : "Cancelled the current run.",
+            },
+          ],
         });
       } else {
         appendTranscript({
           role: "assistant",
-          title: "AGENT",
-          content: error instanceof Error ? error.message : String(error),
+          parts: [
+            {
+              type: "text",
+              text: error instanceof Error ? error.message : String(error),
+            },
+          ],
         });
       }
     } finally {
@@ -678,9 +1022,11 @@ function App() {
       />
       <TranscriptView
         busy={uiBusy}
+        collapsedActivityNodes={collapsedActivityNodes}
         divider={divider}
         entries={visibleTranscript}
         expandedEntries={expandedEntries}
+        onToggleActivityNode={toggleActivityNode}
         onToggleExpanded={toggleExpanded}
       />
       <Composer
