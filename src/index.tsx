@@ -1,6 +1,6 @@
 import { createCliRenderer, TextAttributes } from "@opentui/core";
-import { createRoot } from "@opentui/react";
-import { useEffect, useMemo, useState } from "react";
+import { createRoot, useKeyboard } from "@opentui/react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { buildMainAgent } from "./lib/agents";
 import { deleteConnectorRecord, getDbPath } from "./lib/db";
 import { createGoogleMcpSession, listGoogleMcpTools } from "./lib/mcp";
@@ -9,19 +9,15 @@ import {
   getGoogleConnectorRecord,
 } from "./lib/oauth";
 
-type InputEntry = {
+type TranscriptEntry = {
   id: string;
-  text: string;
-  createdAt: string;
-};
-
-type OutputEntry = {
-  id: string;
-  prompt: string;
-  text: string;
-  reasoning: string;
-  tools: string[];
+  role: "user" | "assistant";
+  title: string;
+  content: string;
+  reasoning?: string;
+  tools?: string[];
   usage?: string;
+  details?: string[];
   createdAt: string;
 };
 
@@ -29,7 +25,7 @@ function makeId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function trimBlock(value: string, maxChars = 1600) {
+function trimBlock(value: string, maxChars = 2200) {
   if (value.length <= maxChars) {
     return value;
   }
@@ -37,57 +33,103 @@ function trimBlock(value: string, maxChars = 1600) {
   return `${value.slice(value.length - maxChars)}\n[truncated]`;
 }
 
+function readStreamText(part: unknown): string {
+  if (typeof part !== "object" || part === null) {
+    return "";
+  }
+
+  const maybeDelta = (part as { delta?: unknown }).delta;
+  if (typeof maybeDelta === "string") {
+    return maybeDelta;
+  }
+
+  const maybeText = (part as { text?: unknown }).text;
+  if (typeof maybeText === "string") {
+    return maybeText;
+  }
+
+  return "";
+}
+
+function formatUsage(part: {
+  finishReason: string;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    outputTokenDetails?: {
+      reasoningTokens?: number;
+    };
+  };
+}) {
+  const inputTokens = part.usage?.inputTokens ?? 0;
+  const outputTokens = part.usage?.outputTokens ?? 0;
+  const reasoningTokens = part.usage?.outputTokenDetails?.reasoningTokens ?? 0;
+  return `finish=${part.finishReason} in=${inputTokens} out=${outputTokens} reasoning=${reasoningTokens}`;
+}
+
 function App() {
-  const [inputs, setInputs] = useState<InputEntry[]>([
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([
     {
       id: makeId(),
-      text: "Commands: /auth, /tools, /reset-auth, /quit",
+      role: "assistant",
+      title: "SYSTEM",
+      content:
+        "Commands: /auth, /tools, /reset-auth, /quit. ctrl+C cancels a running turn or shows a hint.",
       createdAt: new Date().toISOString(),
     },
-  ]);
-  const [outputs, setOutputs] = useState<OutputEntry[]>([]);
-  const [statusLines, setStatusLines] = useState<string[]>([
-    "Waiting for input.",
   ]);
   const [busy, setBusy] = useState(false);
   const [composerKey, setComposerKey] = useState(0);
   const [draft, setDraft] = useState("");
   const [authSummary, setAuthSummary] = useState("Checking saved Google token...");
+  const [lastUsage, setLastUsage] = useState("usage=idle");
+  const [expandedEntries, setExpandedEntries] = useState<Record<string, boolean>>(
+    {}
+  );
+  const abortControllerRef = useRef<AbortController | null>(null);
 
-  const pushInput = (text: string) => {
-    setInputs((current) => [
-      ...current,
-      { id: makeId(), text, createdAt: new Date().toISOString() },
-    ]);
-  };
-
-  const pushStatus = (text: string) => {
-    setStatusLines((current) => [...current.slice(-24), text]);
-  };
-
-  const createOutput = (prompt: string) => {
+  const appendTranscript = (
+    entry: Omit<TranscriptEntry, "id" | "createdAt">
+  ): string => {
     const id = makeId();
-    setOutputs((current) => [
+    setTranscript((current) => [
       ...current,
       {
+        ...entry,
         id,
-        prompt,
-        text: "",
-        reasoning: "",
-        tools: [],
         createdAt: new Date().toISOString(),
       },
     ]);
     return id;
   };
 
-  const updateOutput = (
+  const updateTranscript = (
     id: string,
-    updater: (entry: OutputEntry) => OutputEntry
+    updater: (entry: TranscriptEntry) => TranscriptEntry
   ) => {
-    setOutputs((current) =>
+    setTranscript((current) =>
       current.map((entry) => (entry.id === id ? updater(entry) : entry))
     );
+  };
+
+  const appendDetail = (id: string, line: string) => {
+    setTranscript((current) =>
+      current.map((entry) =>
+        entry.id === id
+          ? {
+              ...entry,
+              details: [...(entry.details ?? []), line].slice(-24),
+            }
+          : entry
+      )
+    );
+  };
+
+  const setExpanded = (id: string, value: boolean) => {
+    setExpandedEntries((current) => ({
+      ...current,
+      [id]: value,
+    }));
   };
 
   useEffect(() => {
@@ -98,8 +140,8 @@ function App() {
       if (!cancelled) {
         setAuthSummary(
           record
-            ? `Google Workspace connected. Tokens stored in ${getDbPath()}.`
-            : `Google Workspace not connected. Tokens will be stored in ${getDbPath()}.`
+            ? `Google connected • token DB ${getDbPath()}`
+            : `Google disconnected • tokens will be written to ${getDbPath()}`
         );
       }
     })();
@@ -109,58 +151,98 @@ function App() {
     };
   }, []);
 
-  const visibleInputs = useMemo(() => inputs.slice(-18), [inputs]);
-  const visibleOutputs = useMemo(() => outputs.slice(-10), [outputs]);
-  const visibleStatus = useMemo(() => statusLines.slice(-18), [statusLines]);
+  useKeyboard((key) => {
+    if (key.ctrl && key.name === "c") {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      } else {
+        appendTranscript({
+          role: "assistant",
+          title: "SYSTEM",
+          content: "Ctrl+C intercepted. Use /quit to exit.",
+        });
+      }
+    }
+
+    if (key.name === "tab") {
+      const lastAssistant = [...transcript]
+        .reverse()
+        .find((entry) => entry.role === "assistant");
+      if (lastAssistant) {
+        setExpanded(
+          lastAssistant.id,
+          !Boolean(expandedEntries[lastAssistant.id])
+        );
+      }
+    }
+  });
+
+  const visibleTranscript = useMemo(() => transcript.slice(-16), [transcript]);
 
   const runPrompt = async (input: string) => {
     const trimmed = input.trim();
-    let activeOutputId: string | null = null;
-
     if (!trimmed || busy) {
       return;
     }
 
     if (trimmed === "/quit") {
-      process.exit(0);
+      await renderer.destroy();
+      return;
     }
 
     setBusy(true);
-    pushInput(trimmed);
+    appendTranscript({
+      role: "user",
+      title: "YOU",
+      content: trimmed,
+    });
 
     try {
       if (trimmed === "/auth") {
-        pushStatus("Starting terminal OAuth for Google Workspace...");
-        const record = await authenticateGoogleWorkspace(pushStatus);
-        setAuthSummary(
-          `Google Workspace connected. Tokens stored in ${getDbPath()} and last updated ${record.updatedAt}.`
+        const outputId = appendTranscript({
+          role: "assistant",
+          title: "AGENT",
+          content: "Starting Google Workspace OAuth...",
+          details: [],
+        });
+        setExpanded(outputId, true);
+        appendDetail(outputId, "Starting terminal OAuth for Google Workspace...");
+        const record = await authenticateGoogleWorkspace((line) =>
+          appendDetail(outputId, line)
         );
-        const outputId = createOutput(trimmed);
-        activeOutputId = outputId;
-        updateOutput(outputId, (entry) => ({
+        setAuthSummary(
+          `Google connected • token DB ${getDbPath()} • updated ${record.updatedAt}`
+        );
+        updateTranscript(outputId, (entry) => ({
           ...entry,
-          text: "Google Workspace connected successfully.",
+          content: "Google Workspace connected successfully.",
         }));
         return;
       }
 
       if (trimmed === "/tools") {
-        const record = await getGoogleConnectorRecord(pushStatus);
-        const outputId = createOutput(trimmed);
-        activeOutputId = outputId;
+        const outputId = appendTranscript({
+          role: "assistant",
+          title: "AGENT",
+          content: "Loading Google MCP tools...",
+          details: [],
+        });
+        const record = await getGoogleConnectorRecord((line) =>
+          appendDetail(outputId, line)
+        );
 
         if (!record) {
-          updateOutput(outputId, (entry) => ({
+          updateTranscript(outputId, (entry) => ({
             ...entry,
-            text: "No Google token yet. Run /auth first.",
+            content: "No Google token yet. Run /auth first.",
           }));
           return;
         }
 
         const tools = await listGoogleMcpTools(record);
-        updateOutput(outputId, (entry) => ({
+        updateTranscript(outputId, (entry) => ({
           ...entry,
-          text:
+          content:
             tools.length === 0
               ? "The Google MCP returned no tools."
               : tools
@@ -171,104 +253,129 @@ function App() {
                   )
                   .join("\n"),
         }));
-        setAuthSummary(
-          `Google Workspace connected. Tokens stored in ${getDbPath()}.`
-        );
+        setAuthSummary(`Google connected • token DB ${getDbPath()}`);
         return;
       }
 
       if (trimmed === "/reset-auth") {
         await deleteConnectorRecord("google-workspace");
         setAuthSummary(
-          `Saved Google tokens cleared. New tokens will be written to ${getDbPath()}.`
+          `Google disconnected • tokens will be written to ${getDbPath()}`
         );
-        const outputId = createOutput(trimmed);
-        activeOutputId = outputId;
-        updateOutput(outputId, (entry) => ({
-          ...entry,
-          text: "Deleted the saved Google Workspace token.",
-        }));
+        appendTranscript({
+          role: "assistant",
+          title: "AGENT",
+          content: "Deleted the saved Google Workspace token.",
+        });
         return;
       }
 
-      const outputId = createOutput(trimmed);
-      activeOutputId = outputId;
-      const record = await getGoogleConnectorRecord(pushStatus);
+      const outputId = appendTranscript({
+        role: "assistant",
+        title: "AGENT",
+        content: "",
+        reasoning: "",
+        tools: [],
+        details: [],
+      });
+      setExpanded(outputId, true);
+
+      const record = await getGoogleConnectorRecord((line) =>
+        appendDetail(outputId, line)
+      );
       const mcpSession = record ? await createGoogleMcpSession(record) : null;
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
 
       try {
         const mainAgent = buildMainAgent({
           googleTools: mcpSession?.tools ?? {},
-          emitStatus: pushStatus,
+          emitStatus: (line) => appendDetail(outputId, line),
         });
 
         const result = await mainAgent.stream({
           prompt: trimmed,
+          abortSignal: abortController.signal,
         });
+        appendDetail(outputId, "Streaming assistant response...");
 
         for await (const part of result.fullStream) {
           switch (part.type) {
             case "text-delta":
-              updateOutput(outputId, (entry) => ({
+            case "text":
+              updateTranscript(outputId, (entry) => ({
                 ...entry,
-                text: entry.text + part.delta,
+                content: entry.content + readStreamText(part),
               }));
               break;
             case "reasoning-delta":
-              updateOutput(outputId, (entry) => ({
+            case "reasoning":
+              updateTranscript(outputId, (entry) => ({
                 ...entry,
-                reasoning: trimBlock(entry.reasoning + part.delta),
+                reasoning: trimBlock(
+                  (entry.reasoning ?? "") + readStreamText(part)
+                ),
               }));
               break;
             case "tool-call":
-              pushStatus(`Tool call: ${part.toolName}`);
-              updateOutput(outputId, (entry) => ({
+              appendDetail(outputId, `Tool call • ${part.toolName}`);
+              updateTranscript(outputId, (entry) => ({
                 ...entry,
-                tools: entry.tools.includes(part.toolName)
+                tools: entry.tools?.includes(part.toolName)
                   ? entry.tools
-                  : [...entry.tools, part.toolName],
+                  : [...(entry.tools ?? []), part.toolName],
               }));
               break;
             case "tool-result":
-              pushStatus(`Tool finished: ${part.toolName}`);
+              appendDetail(outputId, `Tool finished • ${part.toolName}`);
               break;
             case "error":
-              pushStatus(
-                `Stream error: ${
+              appendDetail(
+                outputId,
+                `Stream error • ${
                   part.error instanceof Error
                     ? part.error.message
                     : String(part.error)
                 }`
               );
               break;
-            case "finish":
-              updateOutput(outputId, (entry) => ({
+            case "finish": {
+              const usage = formatUsage(part);
+              setLastUsage(usage);
+              updateTranscript(outputId, (entry) => ({
                 ...entry,
-                usage: `finish=${part.finishReason} in=${part?.usage?.inputTokens ?? 0} out=${part?.usage?.outputTokens ?? 0} reasoning=${part.usage.reasoningTokens ?? part.usage.outputTokenDetails?.reasoningTokens ?? 0}`,
+                usage,
               }));
+              appendDetail(outputId, `Turn finished • ${usage}`);
+              setExpanded(outputId, false);
               break;
+            }
           }
         }
 
         setAuthSummary(
           record
-            ? `Google Workspace connected. Tokens stored in ${getDbPath()}.`
-            : `Google Workspace not connected. Run /auth to enable MCP tools.`
+            ? `Google connected • token DB ${getDbPath()}`
+            : `Google disconnected • run /auth to enable MCP tools`
         );
       } finally {
+        abortControllerRef.current = null;
         await mcpSession?.client.close().catch(() => undefined);
       }
     } catch (error) {
-      const outputId = activeOutputId ?? createOutput(trimmed);
-      updateOutput(outputId, (entry) => ({
-        ...entry,
-        text: error instanceof Error ? error.message : String(error),
-      }));
-      pushStatus(
-        `Request failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
+      if (error instanceof Error && error.name === "AbortError") {
+        appendTranscript({
+          role: "assistant",
+          title: "AGENT",
+          content: "Cancelled the current run.",
+        });
+      } else {
+        appendTranscript({
+          role: "assistant",
+          title: "AGENT",
+          content: error instanceof Error ? error.message : String(error),
+        });
+      }
     } finally {
       setBusy(false);
       setDraft("");
@@ -281,149 +388,139 @@ function App() {
       style={{
         flexGrow: 1,
         flexDirection: "column",
-        padding: 1,
-        gap: 1,
+        paddingLeft: 1,
+        paddingRight: 1,
       }}
     >
       <box
         style={{
-          border: true,
+          height: 2,
           flexDirection: "column",
-          padding: 1,
-          gap: 1,
+          justifyContent: "center",
+          borderBottom: true,
         }}
       >
-        <box justifyContent="space-between">
-          <ascii-font font="tiny" text="Subagents" />
-          <text attributes={TextAttributes.DIM}>
-            Streaming + Reasoning + Google MCP
-          </text>
-        </box>
-        <text>{authSummary}</text>
-      </box>
-
-      <box style={{ flexGrow: 1, gap: 1 }}>
-        <box
-          style={{
-            border: true,
-            flexGrow: 1,
-            flexDirection: "column",
-            padding: 1,
-            gap: 1,
-          }}
-        >
-          <text fg="#93c5fd">INPUT</text>
-          <scrollbox focused style={{ flexGrow: 1 }}>
-            {visibleInputs.map((entry) => (
-              <box
-                key={entry.id}
-                style={{
-                  border: true,
-                  flexDirection: "column",
-                  padding: 1,
-                  marginBottom: 1,
-                }}
-              >
-                <text attributes={TextAttributes.DIM}>{entry.createdAt}</text>
-                <text>{entry.text}</text>
-              </box>
-            ))}
-          </scrollbox>
-        </box>
-
-        <box
-          style={{
-            border: true,
-            flexGrow: 2,
-            flexDirection: "column",
-            padding: 1,
-            gap: 1,
-          }}
-        >
-          <text fg="#6ee7b7">OUTPUT</text>
-          <scrollbox focused style={{ flexGrow: 1 }}>
-            {visibleOutputs.map((entry) => (
-              <box
-                key={entry.id}
-                style={{
-                  border: true,
-                  flexDirection: "column",
-                  padding: 1,
-                  marginBottom: 1,
-                }}
-              >
-                <text fg="#fcd34d">Prompt</text>
-                <text>{entry.prompt}</text>
-                {entry.reasoning ? (
-                  <>
-                    <text fg="#fca5a5">Thinking</text>
-                    <text>{entry.reasoning}</text>
-                  </>
-                ) : null}
-                <text fg="#6ee7b7">Answer</text>
-                <text>{entry.text || (busy ? "Streaming..." : "")}</text>
-                {entry.tools.length > 0 ? (
-                  <>
-                    <text fg="#c4b5fd">Tools</text>
-                    <text>{entry.tools.join(", ")}</text>
-                  </>
-                ) : null}
-                {entry.usage ? (
-                  <text attributes={TextAttributes.DIM}>{entry.usage}</text>
-                ) : null}
-              </box>
-            ))}
-          </scrollbox>
-        </box>
+        <text>
+          <strong>subagents</strong> <span>•</span> {authSummary}
+        </text>
       </box>
 
       <box
         style={{
-          border: true,
-          height: 8,
+          flexGrow: 1,
           flexDirection: "column",
-          padding: 1,
-          gap: 1,
+          borderBottom: true,
+          paddingTop: 1,
+          paddingBottom: 1,
         }}
       >
-        <text fg="#fcd34d">STATUS / MCP</text>
-        <scrollbox focused style={{ flexGrow: 1 }}>
-          {visibleStatus.map((line, index) => (
-            <text key={`${line}-${index}`}>{line}</text>
-          ))}
+        {/* <text fg="#c4b5fd" attributes={TextAttributes.DIM}>
+          TRANSCRIPT
+        </text> */}
+        <scrollbox style={{ flexGrow: 1, paddingTop: 1 }}>
+          {visibleTranscript.map((entry) => {
+            const isExpanded = Boolean(expandedEntries[entry.id]);
+            const hasDetails =
+              Boolean(entry.reasoning) ||
+              Boolean(entry.tools?.length) ||
+              Boolean(entry.usage) ||
+              Boolean(entry.details?.length);
+
+            return (
+            <box
+              key={entry.id}
+              style={{
+                flexDirection: "column",
+                marginBottom: 1,
+                paddingLeft: 1,
+                borderLeft: true,
+              }}
+            >
+              <text fg={entry.role === "user" ? "#93c5fd" : "#6ee7b7"}>
+                {entry.title}
+              </text>
+              <text>{entry.content || (busy ? "Streaming..." : "")}</text>
+              {hasDetails ? (
+                <box style={{ flexDirection: "column", marginTop: 1 }}>
+                  <text
+                    attributes={TextAttributes.DIM}
+                    fg="#a1a1aa"
+                  >
+                    [{isExpanded ? "-" : "+"}] details
+                    {entry.usage ? ` • ${entry.usage}` : ""}
+                  </text>
+                  {isExpanded ? (
+                    <box
+                      style={{
+                        flexDirection: "column",
+                        marginTop: 1,
+                        paddingLeft: 1,
+                        borderLeft: true,
+                      }}
+                    >
+                      {entry.reasoning ? (
+                        <>
+                          <text fg="#fca5a5" attributes={TextAttributes.DIM}>
+                            THINKING
+                          </text>
+                          <text>{entry.reasoning}</text>
+                        </>
+                      ) : null}
+                      {entry.tools && entry.tools.length > 0 ? (
+                        <text attributes={TextAttributes.DIM}>
+                          tools: {entry.tools.join(", ")}
+                        </text>
+                      ) : null}
+                      {entry.details?.map((line, index) => (
+                        <text key={`${entry.id}-detail-${index}`}>{line}</text>
+                      ))}
+                    </box>
+                  ) : null}
+                </box>
+              ) : null}
+            </box>
+            );
+          })}
         </scrollbox>
       </box>
 
       <box
         style={{
-          border: true,
           height: 3,
-          paddingLeft: 1,
-          paddingRight: 1,
+          flexDirection: "column",
+          justifyContent: "center",
+          borderBottom: true,
         }}
       >
         <input
           key={composerKey}
           placeholder={
             busy
-              ? "Agent is streaming..."
-              : "Ask something. Example: find my latest unread email from Alice"
+              ? "Agent is running..."
+              : "Ask something. The main agent can spawn subagents and call Google MCP tools."
           }
+          value={draft}
           focused={!busy}
-          onInput={setDraft}
+          onChange={setDraft}
           onSubmit={runPrompt}
         />
       </box>
 
-      <text attributes={TextAttributes.DIM}>
-        {busy
-          ? "Streaming response and reasoning..."
-          : draft ||
-            "Input and output are separated, and the main agent now streams visible reasoning deltas."}
-      </text>
+      <box
+        style={{
+          height: 1,
+          justifyContent: "center",
+        }}
+      >
+        <text attributes={TextAttributes.DIM}>
+          Enter=send • Tab=toggle latest details • /auth Google • Ctrl+C=cancel • /quit=exit • model=claude-sonnet-4.6 • subagents=research,ops • {lastUsage} • {busy ? "mode=running" : "mode=idle"}
+        </text>
+      </box>
     </box>
   );
 }
 
-const renderer = await createCliRenderer();
+const renderer = await createCliRenderer({
+  exitOnCtrlC: false,
+});
 createRoot(renderer).render(<App />);
