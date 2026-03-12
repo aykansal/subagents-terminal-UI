@@ -28,6 +28,7 @@ import type {
   ChatMessage,
   ChatSessionSummary,
   DataOAuthPart,
+  DataTracePart,
   MessagePart,
 } from "./lib/chat-types";
 import { createGoogleMcpSession, listGoogleMcpTools } from "./lib/mcp";
@@ -108,11 +109,13 @@ function summarizeChat(chatId: string, title: string, transcript: ChatMessage[])
 
 type OutputActivityContext = {
   toolEventIdsByCallId: Record<string, string>;
+  activeSubagentTraceIdsByAgent: Record<string, string[]>;
 };
 
 function createOutputActivityContext(): OutputActivityContext {
   return {
     toolEventIdsByCallId: {},
+    activeSubagentTraceIdsByAgent: {},
   };
 }
 
@@ -233,6 +236,24 @@ function App() {
     });
   };
 
+  const appendMessagePart = (id: string, part: MessagePart) => {
+    updateTranscript(id, (msg) => ({
+      ...msg,
+      parts: [...(msg.parts ?? []), part],
+    }));
+  };
+
+  const updateMessagePart = (
+    id: string,
+    matcher: (part: MessagePart) => boolean,
+    updater: (part: MessagePart) => MessagePart,
+  ) => {
+    updateTranscript(id, (msg) => ({
+      ...msg,
+      parts: (msg.parts ?? []).map((part) => (matcher(part) ? updater(part) : part)),
+    }));
+  };
+
   const setActionStatus = (id: string, actionStatus: string) => {
     updateTranscript(id, (msg) => {
       const parts: MessagePart[] = [...(msg.parts ?? [])];
@@ -275,9 +296,120 @@ function App() {
     return next;
   };
 
-  const handleAgentStatusEvent = (_id: string, _event: AgentStatusEvent) => {
-    // Status events (delegate-start/finish, step-finish, tool-start/finish) are
-    // reflected in tool-invocation parts from the stream; no separate activity tree.
+  const handleAgentStatusEvent = (id: string, event: AgentStatusEvent) => {
+    const context = ensureActivityContext(id);
+
+    const getActiveSubagentTraceId = (agent: string) => {
+      const stack = context.activeSubagentTraceIdsByAgent[agent] ?? [];
+      return stack[stack.length - 1];
+    };
+
+    switch (event.type) {
+      case "delegate-start": {
+        const traceId = makeId();
+        const stack = context.activeSubagentTraceIdsByAgent[event.agent] ?? [];
+        context.activeSubagentTraceIdsByAgent[event.agent] = [...stack, traceId];
+        appendMessagePart(id, {
+          type: "data-trace",
+          data: {
+            id: traceId,
+            label: `${event.agent} subagent`,
+            content: event.task,
+            tone: "action",
+            state: "running",
+          },
+        });
+        return;
+      }
+      case "delegate-finish": {
+        const traceId = getActiveSubagentTraceId(event.agent);
+        if (!traceId) {
+          return;
+        }
+
+        updateMessagePart(
+          id,
+          (part) => part.type === "data-trace" && part.data.id === traceId,
+          (part) =>
+            part.type === "data-trace"
+              ? {
+                  ...part,
+                  data: {
+                    ...part.data,
+                    state: "done",
+                  },
+                }
+              : part,
+        );
+        appendMessagePart(id, {
+          type: "data-trace",
+          data: {
+            id: makeId(),
+            parentId: traceId,
+            label: `${event.agent} response`,
+            content: event.summary,
+            tone: "muted",
+            state: "done",
+          },
+        });
+        context.activeSubagentTraceIdsByAgent[event.agent] = (
+          context.activeSubagentTraceIdsByAgent[event.agent] ?? []
+        ).slice(0, -1);
+        return;
+      }
+      case "step-finish": {
+        const parentId = getActiveSubagentTraceId(event.agent);
+        appendMessagePart(id, {
+          type: "data-trace",
+          data: {
+            id: makeId(),
+            parentId,
+            label: `${event.agent} step`,
+            content: event.text,
+            tone: "muted",
+            state: "done",
+          },
+        });
+        return;
+      }
+      case "tool-start": {
+        const partId = `subagent:${event.agent}:${event.toolCallId}`;
+        context.toolEventIdsByCallId[partId] = partId;
+        const parentTraceId = getActiveSubagentTraceId(event.agent);
+        appendMessagePart(id, {
+          type: "tool-invocation",
+          toolInvocation: {
+            toolCallId: partId,
+            toolName: `${event.agent} · ${event.toolName}`,
+            parentTraceId,
+            args: event.input,
+            state: "call",
+          },
+        });
+        return;
+      }
+      case "tool-finish": {
+        const partId = `subagent:${event.agent}:${event.toolCallId}`;
+        updateMessagePart(
+          id,
+          (part) =>
+            part.type === "tool-invocation" &&
+            part.toolInvocation.toolCallId === partId,
+          (part) =>
+            part.type === "tool-invocation"
+              ? {
+                  ...part,
+                  toolInvocation: {
+                    ...part.toolInvocation,
+                    result: event.success ? event.output : event.error,
+                    state: "result",
+                  },
+                }
+              : part,
+        );
+        return;
+      }
+    }
   };
 
   const appendDetail = (id: string, line: string) => {
@@ -719,86 +851,111 @@ function App() {
             case "text-end":
               break;
             case "tool-input-start":
-            case "tool-input-delta":
-              break;
-            case "tool-call":
-              if (!context.toolEventIdsByCallId[part.toolCallId]) {
-                updateTranscript(outputId, (msg) => {
-                  const parts = [...(msg.parts ?? [])];
-                  parts.push({
-                    type: "tool-invocation",
-                    toolInvocation: {
-                      toolCallId: part.toolCallId,
-                      toolName: part.toolName,
-                      state: "call",
-                      args: part.input,
-                    },
-                  });
-                  return { ...msg, parts };
-                });
-                context.toolEventIdsByCallId[part.toolCallId] = part.toolCallId;
-              } else {
-                updateTranscript(outputId, (msg) => {
-                  const parts = [...(msg.parts ?? [])];
-                  const i = parts.findIndex(
-                    (p) =>
-                      p.type === "tool-invocation" &&
-                      p.toolInvocation.toolCallId === part.toolCallId,
-                  );
-                  if (i >= 0 && parts[i]?.type === "tool-invocation") {
-                    parts[i] = {
-                      ...parts[i],
-                      toolInvocation: {
-                        ...parts[i].toolInvocation,
-                        args: part.input,
-                      },
-                    };
-                  }
-                  return { ...msg, parts };
+              if (!context.toolEventIdsByCallId[part.id]) {
+                context.toolEventIdsByCallId[part.id] = part.id;
+                appendMessagePart(outputId, {
+                  type: "tool-invocation",
+                  toolInvocation: {
+                    toolCallId: part.id,
+                    toolName: part.toolName,
+                    args: "",
+                    state: "partial-call",
+                  },
                 });
               }
               break;
-            case "tool-result":
-              updateTranscript(outputId, (msg) => {
-                const parts = [...(msg.parts ?? [])];
-                const i = parts.findIndex(
-                  (p) =>
-                    p.type === "tool-invocation" &&
-                    p.toolInvocation.toolCallId === part.toolCallId,
+            case "tool-input-delta":
+              updateMessagePart(
+                outputId,
+                (entryPart) =>
+                  entryPart.type === "tool-invocation" &&
+                  entryPart.toolInvocation.toolCallId === part.id,
+                (entryPart) =>
+                  entryPart.type === "tool-invocation"
+                    ? {
+                        ...entryPart,
+                        toolInvocation: {
+                          ...entryPart.toolInvocation,
+                          args:
+                            typeof entryPart.toolInvocation.args === "string"
+                              ? entryPart.toolInvocation.args + part.delta
+                              : part.delta,
+                          state: "partial-call",
+                        },
+                      }
+                    : entryPart,
+              );
+              break;
+            case "tool-call":
+              if (!context.toolEventIdsByCallId[part.toolCallId]) {
+                appendMessagePart(outputId, {
+                  type: "tool-invocation",
+                  toolInvocation: {
+                    toolCallId: part.toolCallId,
+                    toolName: part.toolName,
+                    state: "call",
+                    args: part.input,
+                  },
+                });
+                context.toolEventIdsByCallId[part.toolCallId] = part.toolCallId;
+              } else {
+                updateMessagePart(
+                  outputId,
+                  (entryPart) =>
+                    entryPart.type === "tool-invocation" &&
+                    entryPart.toolInvocation.toolCallId === part.toolCallId,
+                  (entryPart) =>
+                    entryPart.type === "tool-invocation"
+                      ? {
+                          ...entryPart,
+                          toolInvocation: {
+                            ...entryPart.toolInvocation,
+                            toolName: part.toolName,
+                            args: part.input,
+                            state: "call",
+                          },
+                        }
+                      : entryPart,
                 );
-                if (i >= 0 && parts[i]?.type === "tool-invocation") {
-                  parts[i] = {
-                    ...parts[i],
-                    toolInvocation: {
-                      ...parts[i].toolInvocation,
-                      result: part.output,
-                      state: part.preliminary ? "partial-call" : "result",
-                    },
-                  };
-                }
-                return { ...msg, parts };
-              });
+              }
+              break;
+            case "tool-result":
+              updateMessagePart(
+                outputId,
+                (entryPart) =>
+                  entryPart.type === "tool-invocation" &&
+                  entryPart.toolInvocation.toolCallId === part.toolCallId,
+                (entryPart) =>
+                  entryPart.type === "tool-invocation"
+                    ? {
+                        ...entryPart,
+                        toolInvocation: {
+                          ...entryPart.toolInvocation,
+                          result: part.output,
+                          state: part.preliminary ? "partial-call" : "result",
+                        },
+                      }
+                    : entryPart,
+              );
               break;
             case "tool-error":
-              updateTranscript(outputId, (msg) => {
-                const parts = [...(msg.parts ?? [])];
-                const i = parts.findIndex(
-                  (p) =>
-                    p.type === "tool-invocation" &&
-                    p.toolInvocation.toolCallId === part.toolCallId,
-                );
-                if (i >= 0 && parts[i]?.type === "tool-invocation") {
-                  parts[i] = {
-                    ...parts[i],
-                    toolInvocation: {
-                      ...parts[i].toolInvocation,
-                      result: part.error,
-                      state: "result",
-                    },
-                  };
-                }
-                return { ...msg, parts };
-              });
+              updateMessagePart(
+                outputId,
+                (entryPart) =>
+                  entryPart.type === "tool-invocation" &&
+                  entryPart.toolInvocation.toolCallId === part.toolCallId,
+                (entryPart) =>
+                  entryPart.type === "tool-invocation"
+                    ? {
+                        ...entryPart,
+                        toolInvocation: {
+                          ...entryPart.toolInvocation,
+                          result: part.error,
+                          state: "result",
+                        },
+                      }
+                    : entryPart,
+              );
               break;
             case "finish-step":
             case "error":

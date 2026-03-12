@@ -8,6 +8,18 @@ export type DataOAuthPart = {
   };
 };
 
+export type DataTracePart = {
+  type: "data-trace";
+  data: {
+    id: string;
+    parentId?: string;
+    label: string;
+    content?: string;
+    tone?: "default" | "muted" | "tool" | "reasoning" | "action" | "error";
+    state?: "running" | "done" | "error";
+  };
+};
+
 export type MessagePart =
   | { type: "text"; text: string }
   | { type: "reasoning"; reasoning: string }
@@ -16,6 +28,7 @@ export type MessagePart =
       toolInvocation: {
         toolCallId: string;
         toolName: string;
+        parentTraceId?: string;
         args?: unknown;
         result?: unknown;
         state?: "call" | "result" | "partial-call";
@@ -41,6 +54,7 @@ export type MessagePart =
     }
   | { type: "data-usage"; data: unknown }
   | DataOAuthPart
+  | DataTracePart
   | { type: "data-details"; data: string[] };
 
 export type ChatMessage = {

@@ -25,6 +25,12 @@ type TranscriptRowProps = {
   onToggleExpanded: (id: string) => void;
 };
 
+type TraceNode = {
+  key: string;
+  part: MessagePart;
+  children: TraceNode[];
+};
+
 function getPartSummary(part: MessagePart): string {
   switch (part.type) {
     case "text":
@@ -39,6 +45,8 @@ function getPartSummary(part: MessagePart): string {
         : "";
     case "data-oauth":
       return part.data.actionLabel ?? "";
+    case "data-trace":
+      return part.data.label;
     case "data-details":
       return part.data.length ? "trace" : "";
     case "data-webSearchSources":
@@ -62,7 +70,65 @@ function formatUnknown(value: unknown) {
   }
 }
 
-function renderTracePart(part: MessagePart, key: string) {
+function getPartTreeId(part: MessagePart) {
+  if (part.type === "data-trace") {
+    return part.data.id;
+  }
+  if (part.type === "tool-invocation") {
+    return part.toolInvocation.toolCallId;
+  }
+  return undefined;
+}
+
+function getParentTreeId(part: MessagePart) {
+  if (part.type === "data-trace") {
+    return part.data.parentId;
+  }
+  if (part.type === "tool-invocation") {
+    return part.toolInvocation.parentTraceId;
+  }
+  return undefined;
+}
+
+function buildTraceTree(parts: MessagePart[]): TraceNode[] {
+  const roots: TraceNode[] = [];
+  const byId = new Map<string, TraceNode>();
+
+  for (const [index, part] of parts.entries()) {
+    const node: TraceNode = {
+      key: `${getPartTreeId(part) ?? part.type}-${index}`,
+      part,
+      children: [],
+    };
+    const ownId = getPartTreeId(part);
+    if (ownId) {
+      byId.set(ownId, node);
+    }
+
+    const parentId = getParentTreeId(part);
+    const parent = parentId ? byId.get(parentId) : undefined;
+    if (parent) {
+      parent.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+
+  return roots;
+}
+
+function renderTracePart(
+  part: MessagePart,
+  key: string,
+  prefix = "",
+  isLast = true,
+  children: TraceNode[] = [],
+  collapsedActivityNodes: Record<string, boolean> = {},
+  onToggleActivityNode?: (id: string) => void,
+) {
+  const branchPrefix = prefix ? `${prefix}${isLast ? "└─" : "├─"}` : "";
+  const childPrefix = prefix ? `${prefix}${isLast ? "  " : "│ "}` : "";
+
   switch (part.type) {
     case "text":
       if (!part.text.trim()) {
@@ -70,7 +136,7 @@ function renderTracePart(part: MessagePart, key: string) {
       }
       return (
         <text key={key} fg={uiColors.text} attributes={TextAttributes.NONE}>
-          {formatBlock(part.text, "=")}
+          {formatBlock(part.text, branchPrefix ? `${branchPrefix} =` : "=")}
         </text>
       );
     case "reasoning":
@@ -79,7 +145,7 @@ function renderTracePart(part: MessagePart, key: string) {
       }
       return (
         <text key={key} fg={uiColors.reasoning} attributes={TextAttributes.NONE}>
-          {formatBlock(part.reasoning, "~")}
+          {formatBlock(part.reasoning, branchPrefix ? `${branchPrefix} ~` : "~")}
         </text>
       );
     case "tool-invocation": {
@@ -90,18 +156,41 @@ function renderTracePart(part: MessagePart, key: string) {
           <text fg={uiColors.tool} attributes={TextAttributes.NONE}>
             {formatBlock(
               `${running ? "+" : "•"} ${toolInvocation.toolName}${running ? "..." : ""}`,
-              " ",
+              branchPrefix || " ",
             )}
           </text>
           {toolInvocation.args !== undefined ? (
             <text fg={uiColors.muted} attributes={TextAttributes.NONE}>
-              {formatBlock(formatUnknown(toolInvocation.args), "| args", "|     ")}
+              {formatBlock(
+                formatUnknown(toolInvocation.args),
+                `${childPrefix}| args`,
+                `${childPrefix}|     `,
+              )}
             </text>
           ) : null}
           {toolInvocation.result !== undefined ? (
             <text fg={uiColors.muted} attributes={TextAttributes.NONE}>
-              {formatBlock(formatUnknown(toolInvocation.result), "| result", "|        ")}
+              {formatBlock(
+                formatUnknown(toolInvocation.result),
+                `${childPrefix}| result`,
+                `${childPrefix}|        `,
+              )}
             </text>
+          ) : null}
+          {children.length > 0 ? (
+            <box style={{ flexDirection: "column" }}>
+              {children.map((child, index) =>
+                renderTracePart(
+                  child.part,
+                  child.key,
+                  childPrefix,
+                  index === children.length - 1,
+                  child.children,
+                  collapsedActivityNodes,
+                  onToggleActivityNode,
+                ),
+              )}
+            </box>
           ) : null}
         </box>
       );
@@ -131,6 +220,65 @@ function renderTracePart(part: MessagePart, key: string) {
           </text>
         </box>
       );
+    case "data-trace": {
+      const tone = part.data.tone ?? "default";
+      const collapsed = Boolean(collapsedActivityNodes[part.data.id]);
+      const toggle = children.length > 0 ? (collapsed ? "[+]" : "[-]") : "   ";
+      const color =
+        tone === "tool"
+          ? uiColors.tool
+          : tone === "reasoning"
+            ? uiColors.reasoning
+            : tone === "action"
+              ? uiColors.action
+              : tone === "error"
+                ? uiColors.error
+                : tone === "muted"
+                  ? uiColors.muted
+                  : uiColors.text;
+      const suffix =
+        part.data.state === "running"
+          ? "..."
+          : part.data.state === "error"
+            ? " (failed)"
+            : "";
+
+      return (
+        <box key={key} style={{ flexDirection: "column" }}>
+          <text
+            fg={color}
+            attributes={TextAttributes.NONE}
+            onMouseDown={() => {
+              if (children.length > 0 && onToggleActivityNode) {
+                onToggleActivityNode(part.data.id);
+              }
+            }}
+          >
+            {formatBlock(`${toggle} ${part.data.label}${suffix}`, branchPrefix || "·")}
+          </text>
+          {part.data.content ? (
+            <text fg={uiColors.muted} attributes={TextAttributes.NONE}>
+              {formatBlock(part.data.content, `${childPrefix}|`, `${childPrefix}|`)}
+            </text>
+          ) : null}
+          {!collapsed && children.length > 0 ? (
+            <box style={{ flexDirection: "column" }}>
+              {children.map((child, index) =>
+                renderTracePart(
+                  child.part,
+                  child.key,
+                  childPrefix,
+                  index === children.length - 1,
+                  child.children,
+                  collapsedActivityNodes,
+                  onToggleActivityNode,
+                ),
+              )}
+            </box>
+          ) : null}
+        </box>
+      );
+    }
     case "data-details":
       return (
         <box key={key} style={{ flexDirection: "column" }}>
@@ -142,7 +290,10 @@ function renderTracePart(part: MessagePart, key: string) {
                 fg={isToolLine ? uiColors.tool : uiColors.muted}
                 attributes={TextAttributes.NONE}
               >
-                {formatBlock(line, isToolLine ? "+" : "|")}
+                {formatBlock(
+                  line,
+                  branchPrefix ? `${branchPrefix} ${isToolLine ? "+" : "|"}` : isToolLine ? "+" : "|",
+                )}
               </text>
             );
           })}
@@ -159,11 +310,13 @@ function renderTracePart(part: MessagePart, key: string) {
 
 function TranscriptRow({
   busy,
+  collapsedActivityNodes,
   divider,
   entry,
   expanded,
   isFirst,
   isLast,
+  onToggleActivityNode,
   onToggleExpanded,
 }: TranscriptRowProps) {
   const isUser = entry.role === "user";
@@ -231,8 +384,16 @@ function TranscriptRow({
                   paddingLeft: uiSpacing.inset,
                 }}
               >
-                {parts.map((part, index) =>
-                  renderTracePart(part, `${entry.id}-part-${index}`),
+                {buildTraceTree(parts).map((node, index, nodes) =>
+                  renderTracePart(
+                    node.part,
+                    node.key,
+                    "",
+                    index === nodes.length - 1,
+                    node.children,
+                    collapsedActivityNodes,
+                    onToggleActivityNode,
+                  ),
                 )}
               </box>
             ) : null}
