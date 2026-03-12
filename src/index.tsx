@@ -1,5 +1,10 @@
 import { createCliRenderer, TextAttributes } from "@opentui/core";
-import { createRoot, useKeyboard, useRenderer } from "@opentui/react";
+import {
+  createRoot,
+  useKeyboard,
+  useRenderer,
+  useTerminalDimensions,
+} from "@opentui/react";
 import { execFileSync } from "node:child_process";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { buildMainAgent } from "./lib/agents";
@@ -71,6 +76,19 @@ function formatUsage(part: {
   return `finish=${part.finishReason} in=${inputTokens} out=${outputTokens} reasoning=${reasoningTokens}`;
 }
 
+function formatBlock(
+  content: string,
+  prefix: string,
+  continuationPrefix = "  "
+) {
+  return content
+    .split("\n")
+    .map((line, index) =>
+      index === 0 ? `${prefix} ${line}` : `${continuationPrefix}${line}`
+    )
+    .join("\n");
+}
+
 function copyWithSystemClipboard(text: string): boolean {
   const attempts: Array<[string, string[]]> = [];
 
@@ -98,6 +116,7 @@ function copyWithSystemClipboard(text: string): boolean {
 
 function App() {
   const tuiRenderer = useRenderer();
+  const { width } = useTerminalDimensions();
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([
     {
       id: makeId(),
@@ -245,6 +264,10 @@ function App() {
   });
 
   const visibleTranscript = useMemo(() => transcript.slice(-16), [transcript]);
+  const divider = useMemo(
+    () => "─".repeat(Math.max(16, width - 4)),
+    [width]
+  );
 
   const runPrompt = async (input: string) => {
     const trimmed = input.trim();
@@ -258,6 +281,8 @@ function App() {
     }
 
     setBusy(true);
+    setDraft("");
+    setComposerKey((current) => current + 1);
     appendTranscript({
       role: "user",
       title: "YOU",
@@ -391,14 +416,12 @@ function App() {
         for await (const part of result.fullStream) {
           switch (part.type) {
             case "text-delta":
-            case "text":
               updateTranscript(outputId, (entry) => ({
                 ...entry,
                 content: entry.content + readStreamText(part),
               }));
               break;
             case "reasoning-delta":
-            case "reasoning":
               updateTranscript(outputId, (entry) => ({
                 ...entry,
                 reasoning: trimBlock(
@@ -470,8 +493,6 @@ function App() {
       }
     } finally {
       setBusy(false);
-      setDraft("");
-      setComposerKey((current) => current + 1);
     }
   };
 
@@ -486,14 +507,20 @@ function App() {
     >
       <box
         style={{
-          height: 2,
+          height: 3,
           flexDirection: "column",
           justifyContent: "center",
-          borderBottom: true,
+          paddingTop: 1,
         }}
       >
-        <text>
-          <strong>subagents</strong> <span>•</span> {authSummary}
+        <text fg="#f5f5f5">
+          <strong>subagents</strong>
+        </text>
+        <text fg="#a1a1aa" attributes={TextAttributes.DIM}>
+          {authSummary}
+        </text>
+        <text fg="#3f3f46" attributes={TextAttributes.DIM}>
+          {divider}
         </text>
       </box>
 
@@ -501,85 +528,118 @@ function App() {
         style={{
           flexGrow: 1,
           flexDirection: "column",
-          borderBottom: true,
           paddingTop: 1,
           paddingBottom: 1,
         }}
       >
-        {/* <text fg="#c4b5fd" attributes={TextAttributes.DIM}>
-          TRANSCRIPT
-        </text> */}
-        <scrollbox style={{ flexGrow: 1, paddingTop: 1 }}>
-          {visibleTranscript.map((entry) => {
+        <scrollbox style={{ flexGrow: 1, paddingTop: 1, paddingBottom: 1 }}>
+          {visibleTranscript.map((entry, index) => {
             const isExpanded = Boolean(expandedEntries[entry.id]);
             const hasDetails =
               Boolean(entry.reasoning) ||
               Boolean(entry.tools?.length) ||
               Boolean(entry.usage) ||
               Boolean(entry.details?.length);
+            const isUser = entry.role === "user";
+            const marker = isUser ? ">" : "*";
+            const accent = isUser ? "#f4f4f5" : "#e5e7eb";
+            const summaryLine =
+              entry.content || (!isUser && busy ? "Streaming..." : "");
+            const label = entry.title === "SYSTEM" ? "[system] " : "";
 
             return (
-            <box
-              key={entry.id}
-              style={{
-                flexDirection: "column",
-                marginBottom: 1,
-                paddingLeft: 1,
-                borderLeft: true,
-              }}
-            >
-              <text fg={entry.role === "user" ? "#93c5fd" : "#6ee7b7"}>
-                {entry.title}
-              </text>
-              <text>{entry.content || (busy ? "Streaming..." : "")}</text>
-              {hasDetails ? (
-                <box style={{ flexDirection: "column", marginTop: 1 }}>
-                  <text
-                    attributes={TextAttributes.DIM}
-                    fg="#a1a1aa"
-                  >
-                    [{isExpanded ? "-" : "+"}] details
-                    {entry.usage ? ` • ${entry.usage}` : ""}
+              <box
+                key={entry.id}
+                style={{
+                  flexDirection: "column",
+                  marginBottom: index === visibleTranscript.length - 1 ? 0 : 1,
+                  paddingTop: index === 0 ? 0 : 1,
+                }}
+              >
+                {index > 0 ? (
+                  <text fg="#3f3f46" attributes={TextAttributes.DIM}>
+                    {divider}
                   </text>
-                  {isExpanded ? (
-                    <box
-                      style={{
-                        flexDirection: "column",
-                        marginTop: 1,
-                        paddingLeft: 1,
-                        borderLeft: true,
-                      }}
-                    >
-                      {entry.reasoning ? (
-                        <>
-                          <text fg="#fca5a5" attributes={TextAttributes.DIM}>
-                            THINKING
-                          </text>
-                          <text>{entry.reasoning}</text>
-                        </>
-                      ) : null}
-                      {entry.tools && entry.tools.length > 0 ? (
-                        <text attributes={TextAttributes.DIM}>
-                          tools: {entry.tools.join(", ")}
-                        </text>
-                      ) : null}
-                      {entry.actionLabel ? (
-                        <box style={{ flexDirection: "column", marginTop: 1 }}>
-                          <text fg="#93c5fd">[ {entry.actionLabel} ]</text>
-                          <text attributes={TextAttributes.DIM}>
-                            {entry.actionStatus ??
-                              "Press Ctrl+Y to copy this, then paste in your browser with the Google account you want to connect."}
-                          </text>
+                ) : null}
+
+                <box
+                  style={{
+                    flexDirection: "column",
+                    marginTop: index === 0 ? 0 : 1,
+                  }}
+                >
+                  <text fg={accent}>
+                    {formatBlock(`${label}${summaryLine || "..."}`, marker)}
+                  </text>
+
+                  {hasDetails ? (
+                    <box style={{ flexDirection: "column", marginTop: 1 }}>
+                      <text fg="#71717a" attributes={TextAttributes.DIM}>
+                        {entry.usage
+                          ? `${isExpanded ? "[-]" : "[+]"} ${entry.usage}`
+                          : `${isExpanded ? "[-]" : "[+]"} details`}
+                      </text>
+
+                      {isExpanded ? (
+                        <box
+                          style={{
+                            flexDirection: "column",
+                            marginTop: 1,
+                            paddingLeft: 2,
+                          }}
+                        >
+                          {entry.reasoning ? (
+                            <text fg="#a78bfa" attributes={TextAttributes.DIM}>
+                              {formatBlock(entry.reasoning, "~")}
+                            </text>
+                          ) : null}
+
+                          {entry.tools && entry.tools.length > 0 ? (
+                            <text fg="#34d399">
+                              {formatBlock(
+                                `tools ${entry.tools.join(", ")}`,
+                                "+"
+                              )}
+                            </text>
+                          ) : null}
+
+                          {entry.actionLabel ? (
+                            <box style={{ flexDirection: "column", marginTop: 1 }}>
+                              <text fg="#60a5fa">
+                                {formatBlock(`[ ${entry.actionLabel} ]`, "+")}
+                              </text>
+                              <text fg="#a1a1aa" attributes={TextAttributes.DIM}>
+                                {formatBlock(
+                                  entry.actionStatus ??
+                                    "Press Ctrl+Y to copy this, then paste it into your browser with the Google account you want to connect.",
+                                  "|"
+                                )}
+                              </text>
+                            </box>
+                          ) : null}
+
+                          {entry.details?.map((line, detailIndex) => (
+                            <text
+                              key={`${entry.id}-detail-${detailIndex}`}
+                              fg={line.includes("Tool") ? "#34d399" : "#a1a1aa"}
+                              attributes={
+                                line.includes("Tool")
+                                  ? TextAttributes.NONE
+                                  : TextAttributes.DIM
+                              }
+                            >
+                              {formatBlock(
+                                line,
+                                line.includes("Tool") ? "+" : "|"
+                              )}
+                            </text>
+                          ))}
                         </box>
                       ) : null}
-                      {entry.details?.map((line, index) => (
-                        <text key={`${entry.id}-detail-${index}`}>{line}</text>
-                      ))}
                     </box>
                   ) : null}
                 </box>
-              ) : null}
-            </box>
+              </box>
             );
           })}
         </scrollbox>
@@ -587,34 +647,44 @@ function App() {
 
       <box
         style={{
-          height: 3,
+          height: 4,
           flexDirection: "column",
           justifyContent: "center",
-          borderBottom: true,
+          paddingTop: 1,
         }}
       >
-        <input
-          key={composerKey}
-          placeholder={
-            busy
-              ? "Agent is running..."
-              : "Ask something. The main agent can spawn subagents and call Google MCP tools."
-          }
-          value={draft}
-          focused={!busy}
-          onChange={setDraft}
-          onSubmit={runPrompt}
-        />
+        <text fg="#3f3f46" attributes={TextAttributes.DIM}>
+          {divider}
+        </text>
+        <box style={{ flexDirection: "row", alignItems: "center" }}>
+          <text fg="#f5f5f5">{">"}</text>
+          <box style={{ flexGrow: 1, paddingLeft: 1 }}>
+            <input
+              key={composerKey}
+              placeholder={busy ? "Agent is running..." : "Enter prompt here"}
+              placeholderColor="#71717a"
+              value={draft}
+              focused={!busy}
+              onChange={setDraft}
+              onSubmit={(value) => {
+                if (typeof value === "string") {
+                  void runPrompt(value);
+                }
+              }}
+            />
+          </box>
+        </box>
       </box>
 
       <box
         style={{
-          height: 1,
+          height: 4,
+          flexDirection: "column",
           justifyContent: "center",
         }}
       >
-        <text attributes={TextAttributes.DIM}>
-          Enter=send • Tab=toggle latest details • Ctrl+Y=copy auth link • /auth Google • Ctrl+C=cancel • /quit=exit • model=claude-sonnet-4.6 • subagents=research,ops • {lastUsage} • {busy ? "mode=running" : "mode=idle"}
+        <text fg="#71717a" attributes={TextAttributes.DIM}>
+          Enter=send • Ctrl+Y=copy auth link • /auth • /tools • /reset-auth • Ctrl+C=cancel • /quit • {busy ? "mode=running" : "mode=idle"}
         </text>
       </box>
     </box>

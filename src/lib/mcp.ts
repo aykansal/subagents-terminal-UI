@@ -233,7 +233,7 @@ export async function getGoogleMcpClient(record: ConnectorRecord) {
       buildAuthHeaders(record)
     ),
     name: "subagents-cli",
-    version: "0.1.0",
+    // version: "0.1.0"
   });
 }
 
