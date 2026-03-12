@@ -1,5 +1,6 @@
 import { TextAttributes } from "@opentui/core";
 import {
+  flattenActivitySequence,
   formatBlock,
   orderActivityTree,
   type OrderedTranscriptActivityEvent,
@@ -108,11 +109,7 @@ function ActivityNode({
     <box style={{ flexDirection: "column" }}>
       <text
         fg={getActivityColor(event)}
-        attributes={
-          event.kind === "reasoning" || event.tone === "muted"
-            ? TextAttributes.DIM
-            : TextAttributes.NONE
-        }
+        attributes={TextAttributes.NONE}
         onMouseDown={() => {
           if (isCollapsible) {
             onToggleActivityNode(event.id);
@@ -123,30 +120,64 @@ function ActivityNode({
       </text>
 
       {event.content && !collapsed ? (
-        <text
-          fg={getActivityColor(event)}
-          attributes={
-            event.kind === "reasoning" || event.kind === "text"
-              ? TextAttributes.DIM
-              : TextAttributes.NONE
-          }
-        >
+        <text fg={getActivityColor(event)} attributes={TextAttributes.NONE}>
           {formatBlock(event.content, `${childTrail}  `, `${childTrail}  `)}
         </text>
       ) : null}
 
-      {!collapsed
-        ? event.children.map((child, index) => (
-            <ActivityNode
-              key={child.id}
-              collapsedActivityNodes={collapsedActivityNodes}
-              event={child}
-              isLast={index === event.children.length - 1}
-              onToggleActivityNode={onToggleActivityNode}
-              trail={childTrail}
-            />
-          ))
-        : null}
+      {!collapsed ? (
+        <ActivitySequence
+          collapsedActivityNodes={collapsedActivityNodes}
+          events={event.children}
+          onToggleActivityNode={onToggleActivityNode}
+          trail={childTrail}
+        />
+      ) : null}
+    </box>
+  );
+}
+
+function ActivitySequence({
+  collapsedActivityNodes,
+  events,
+  onToggleActivityNode,
+  trail,
+}: {
+  collapsedActivityNodes: Record<string, boolean>;
+  events: OrderedTranscriptActivityEvent[];
+  onToggleActivityNode: (id: string) => void;
+  trail: string;
+}) {
+  const sequence = flattenActivitySequence(events);
+  return (
+    <box style={{ flexDirection: "column" }}>
+      {sequence.map((item, index) => {
+        if (item.type === "inline") {
+          const { event } = item;
+          if (!event.content?.trim()) return null;
+          const prefix = event.kind === "reasoning" ? "~" : "=";
+          const linePrefix = trail ? `${trail}  ` : "";
+          return (
+            <text
+              key={event.id}
+              fg={uiColors.text}
+              attributes={TextAttributes.NONE}
+            >
+              {formatBlock(event.content, linePrefix + prefix, linePrefix)}
+            </text>
+          );
+        }
+        return (
+          <ActivityNode
+            key={item.event.id}
+            collapsedActivityNodes={collapsedActivityNodes}
+            event={item.event}
+            isLast={index === sequence.length - 1}
+            onToggleActivityNode={onToggleActivityNode}
+            trail={trail}
+          />
+        );
+      })}
     </box>
   );
 }
@@ -161,19 +192,14 @@ function ActivityTree({
   onToggleActivityNode: (id: string) => void;
 }) {
   const ordered = orderActivityTree(events);
-
   return (
     <box style={{ flexDirection: "column", marginTop: 0.2 }}>
-      {ordered.map((event, index) => (
-        <ActivityNode
-          key={event.id}
-          collapsedActivityNodes={collapsedActivityNodes}
-          event={event}
-          isLast={index === ordered.length - 1}
-          onToggleActivityNode={onToggleActivityNode}
-          trail=""
-        />
-      ))}
+      <ActivitySequence
+        collapsedActivityNodes={collapsedActivityNodes}
+        events={ordered}
+        onToggleActivityNode={onToggleActivityNode}
+        trail=""
+      />
     </box>
   );
 }
@@ -202,7 +228,7 @@ function TranscriptRow({
   const summaryLine =
     isUser || !hasActivity
       ? entry.content || (!isUser && busy ? "Streaming..." : "")
-      : "execution trace";
+      : "";
   const label = entry.title === "SYSTEM" ? "[system] " : "";
 
   return (
@@ -231,11 +257,19 @@ function TranscriptRow({
           </text>
         ) : null}
 
-        {hasDetails ? (
+        {hasActivity ? (
+          <box style={{ flexDirection: "column", marginTop: 0.2 }}>
+            <ActivityTree
+              collapsedActivityNodes={collapsedActivityNodes}
+              events={entry.activity!}
+              onToggleActivityNode={onToggleActivityNode}
+            />
+          </box>
+        ) : hasDetails ? (
           <box style={{ flexDirection: "column", marginTop: 0.5 }}>
             <text
               fg={uiColors.subtle}
-              attributes={TextAttributes.DIM}
+              attributes={TextAttributes.NONE}
               onMouseDown={() => onToggleExpanded(entry.id)}
             >
               {entry.usage
@@ -251,16 +285,8 @@ function TranscriptRow({
                   paddingLeft: uiSpacing.inset,
                 }}
               >
-                {entry.activity?.length ? (
-                  <ActivityTree
-                    collapsedActivityNodes={collapsedActivityNodes}
-                    events={entry.activity}
-                    onToggleActivityNode={onToggleActivityNode}
-                  />
-                ) : null}
-
-                {!entry.activity?.length && entry.reasoning ? (
-                  <text fg={uiColors.reasoning} attributes={TextAttributes.DIM}>
+                {entry.reasoning ? (
+                  <text fg={uiColors.reasoning} attributes={TextAttributes.NONE}>
                     {formatBlock(entry.reasoning, "~")}
                   </text>
                 ) : null}
@@ -276,7 +302,7 @@ function TranscriptRow({
                     <text fg={uiColors.action}>
                       {formatBlock(`[ ${entry.actionLabel} ]`, "+")}
                     </text>
-                    <text fg={uiColors.muted} attributes={TextAttributes.DIM}>
+                    <text fg={uiColors.muted} attributes={TextAttributes.NONE}>
                       {formatBlock(
                         entry.actionStatus ?? uiCopy.authCopyHint,
                         "|",
@@ -293,9 +319,7 @@ function TranscriptRow({
                         <text
                           key={`${entry.id}-detail-${detailIndex}`}
                           fg={isToolLine ? uiColors.tool : uiColors.muted}
-                          attributes={
-                            isToolLine ? TextAttributes.NONE : TextAttributes.DIM
-                          }
+                          attributes={TextAttributes.NONE}
                         >
                           {formatBlock(line, isToolLine ? "+" : "|")}
                         </text>

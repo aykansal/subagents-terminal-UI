@@ -10,10 +10,6 @@ type AppHeaderProps = {
   onSelectChat: (chatId: string) => void;
 };
 
-function formatChatLabel(title: string, count: number) {
-  return `${title}${count > 0 ? ` (${count})` : ""}`;
-}
-
 export function AppHeader({
   activeChatId,
   chats,
@@ -21,7 +17,7 @@ export function AppHeader({
   onCreateChat,
   onSelectChat,
 }: AppHeaderProps) {
-  const visibleChats = chats.slice(0, 4);
+  const visibleChats = chats.slice(0, 6);
 
   return (
     <box
@@ -56,9 +52,9 @@ export function AppHeader({
                 fg={active ? uiColors.primary : uiColors.subtle}
                 attributes={active ? TextAttributes.BOLD : TextAttributes.DIM}
               >
-                {active ? "[ " : ""}
-                {formatChatLabel(chat.title, chat.messageCount)}
-                {active ? " ]" : ""}
+                {active ? "[ " : "("}
+                {chat.title}
+                {active ? " ]" : ")"}
               </text>
             </box>
           );

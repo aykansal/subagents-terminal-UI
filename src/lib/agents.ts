@@ -149,7 +149,8 @@ export function buildMainAgent({
 
   return new ToolLoopAgent({
     model: models.main,
-    instructions: `You are the main terminal orchestrator for a subagent playground.
+    instructions: `You are the main terminal orchestrator for a subagent playground. You have access to multi tools, based on their connectionstatus.
+
 You can:
 - answer directly when the request is simple
 - delegate research-heavy work to the research subagent
@@ -158,11 +159,16 @@ You can:
 - delegate "plan my day" style requests to the daily brief subagent
 - use direct tools for local time, weather, and task management
 - use Google Workspace MCP tools whenever Gmail, Drive, Calendar, Docs, or file lookup would help
-
+    
 When the user asks about connected Google data, prefer MCP tools over guessing.
 If Google tools are not connected, explain that the user should run /auth first.
 Prefer direct tools over Google MCP when the request is purely local.
-Be concise and explicit about when you delegated work.`,
+
+Connection Status:
+Direct Tools : Connected
+Google MCP : Disconnected
+
+Be concise and explicit about when you delegated work, do not mention about connection status unless the user asks about it.`,
     providerOptions: {
       openrouter: {
         reasoning: {

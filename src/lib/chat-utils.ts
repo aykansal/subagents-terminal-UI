@@ -4,6 +4,40 @@ export type OrderedTranscriptActivityEvent = TranscriptActivityEvent & {
   children: OrderedTranscriptActivityEvent[];
 };
 
+export type FlattenedActivityItem =
+  | { type: "inline"; event: OrderedTranscriptActivityEvent }
+  | { type: "branch"; event: OrderedTranscriptActivityEvent };
+
+/**
+ * Flattens the activity tree into a display sequence: text/reasoning as inline
+ * (no collapsible branch), tool/result/error as collapsible branches. Steps are
+ * transparent (children appear at the same level). Preserves LLM order.
+ */
+export function flattenActivitySequence(
+  ordered: OrderedTranscriptActivityEvent[],
+): FlattenedActivityItem[] {
+  const out: FlattenedActivityItem[] = [];
+
+  const visit = (events: OrderedTranscriptActivityEvent[]) => {
+    for (const event of events) {
+      // Steps are transparent containers – we don't render them directly.
+      if (event.kind === "step") {
+        visit(event.children);
+        continue;
+      }
+
+      if (event.kind === "text" || event.kind === "reasoning") {
+        out.push({ type: "inline", event });
+        continue;
+      }
+      out.push({ type: "branch", event });
+    }
+  };
+
+  visit(ordered);
+  return out;
+}
+
 export function formatBlock(
   content: string,
   prefix: string,
@@ -33,9 +67,9 @@ export function deriveChatTitle(
   }
 
   const normalized = firstUserMessage.content.replace(/\s+/g, " ").trim();
-  return normalized.length <= 36
+  return normalized.length <= 15
     ? normalized
-    : `${normalized.slice(0, 33).trimEnd()}...`;
+    : `${normalized.slice(0, 15).trimEnd()}...`;
 }
 
 export function trimInline(value: string, maxChars = 180) {
