@@ -8,6 +8,7 @@ export const uiColors = {
   tool: "#34d399",
   action: "#60a5fa",
   reasoning: "#a78bfa",
+  error: "#f87171",
   primary:"#C96442"
 } as const;
 

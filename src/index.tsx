@@ -7,8 +7,12 @@ import {
 } from "@opentui/react";
 import { execFileSync } from "node:child_process";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { buildMainAgent } from "./lib/agents";
-import { deriveChatTitle } from "./lib/chat-utils";
+import { buildMainAgent, type AgentStatusEvent } from "./lib/agents";
+import {
+  deriveChatTitle,
+  formatStructuredValue,
+  trimInline,
+} from "./lib/chat-utils";
 import {
   createChatSession,
   deleteConnectorRecord,
@@ -20,7 +24,11 @@ import {
   setActiveChatSession,
 } from "./lib/db";
 import { createDirectTools } from "./lib/direct-tools";
-import type { ChatSessionSummary, TranscriptEntry } from "./lib/chat-types";
+import type {
+  ChatSessionSummary,
+  TranscriptActivityEvent,
+  TranscriptEntry,
+} from "./lib/chat-types";
 import { createGoogleMcpSession, listGoogleMcpTools } from "./lib/mcp";
 import {
   authenticateGoogleWorkspace,
@@ -105,6 +113,35 @@ function summarizeChat(chatId: string, title: string, transcript: TranscriptEntr
   } satisfies ChatSessionSummary;
 }
 
+type ActiveSubagentContext = {
+  rootEventId: string;
+  currentStepId?: string;
+  toolEventIdsByCallId: Record<string, string>;
+};
+
+type OutputActivityContext = {
+  currentStepId?: string;
+  textEventIdsByStreamId: Record<string, string>;
+  reasoningEventIdsByStreamId: Record<string, string>;
+  toolEventIdsByCallId: Record<string, string>;
+  activeDelegateEventIds: string[];
+  activeSubagents: ActiveSubagentContext[];
+};
+
+function createOutputActivityContext(): OutputActivityContext {
+  return {
+    textEventIdsByStreamId: {},
+    reasoningEventIdsByStreamId: {},
+    toolEventIdsByCallId: {},
+    activeDelegateEventIds: [],
+    activeSubagents: [],
+  };
+}
+
+function isDelegateTool(toolName: string) {
+  return toolName.startsWith("delegate");
+}
+
 function App() {
   const tuiRenderer = useRenderer();
   const { width } = useTerminalDimensions();
@@ -126,6 +163,7 @@ function App() {
   const activeChatIdRef = useRef<string | null>(null);
   const chatSessionsRef = useRef<ChatSessionSummary[]>([]);
   const persistQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const activityContextRef = useRef<Record<string, OutputActivityContext>>({});
 
   const uiBusy = busy || booting || !activeChatId;
   const activeChatSummary =
@@ -238,6 +276,184 @@ function App() {
     );
   };
 
+  const ensureActivityContext = (id: string) => {
+    const existing = activityContextRef.current[id];
+    if (existing) {
+      return existing;
+    }
+
+    const next = createOutputActivityContext();
+    activityContextRef.current[id] = next;
+    return next;
+  };
+
+  const appendActivity = (
+    id: string,
+    event: Omit<TranscriptActivityEvent, "id">,
+  ) => {
+    const eventId = makeId();
+
+    updateTranscript(id, (entry) => ({
+      ...entry,
+      activity: [...(entry.activity ?? []), { ...event, id: eventId }],
+    }));
+
+    return eventId;
+  };
+
+  const updateActivity = (
+    id: string,
+    eventId: string,
+    updater: (event: TranscriptActivityEvent) => TranscriptActivityEvent,
+  ) => {
+    updateTranscript(id, (entry) => ({
+      ...entry,
+      activity: (entry.activity ?? []).map((event) =>
+        event.id === eventId ? updater(event) : event,
+      ),
+    }));
+  };
+
+  const appendActivityContent = (
+    id: string,
+    eventId: string,
+    value: string,
+    trimTo = 2200,
+  ) => {
+    updateActivity(id, eventId, (event) => ({
+      ...event,
+      content: trimBlock(`${event.content ?? ""}${value}`, trimTo),
+    }));
+  };
+
+  const getActiveParentId = (context: OutputActivityContext) => {
+    const activeSubagent =
+      context.activeSubagents[context.activeSubagents.length - 1];
+
+    return activeSubagent?.currentStepId ??
+      activeSubagent?.rootEventId ??
+      context.currentStepId;
+  };
+
+  const handleAgentStatusEvent = (id: string, event: AgentStatusEvent) => {
+    const context = ensureActivityContext(id);
+    const activeDelegateId =
+      context.activeDelegateEventIds[context.activeDelegateEventIds.length - 1];
+    const activeSubagent =
+      context.activeSubagents[context.activeSubagents.length - 1];
+
+    switch (event.type) {
+      case "delegate-start": {
+        if (!activeDelegateId) {
+          return;
+        }
+
+        const rootEventId = appendActivity(id, {
+          parentId: activeDelegateId,
+          kind: "status",
+          label: `spawn ${event.agent} subagent`,
+          content: trimInline(event.task, 240),
+          tone: "action",
+          state: "running",
+        });
+
+        context.activeSubagents.push({
+          rootEventId,
+          toolEventIdsByCallId: {},
+        });
+        return;
+      }
+      case "delegate-finish": {
+        if (!activeSubagent) {
+          return;
+        }
+
+        updateActivity(id, activeSubagent.rootEventId, (item) => ({
+          ...item,
+          state: "done",
+        }));
+
+        if (event.summary.trim()) {
+          appendActivity(id, {
+            parentId: activeSubagent.rootEventId,
+            kind: "result",
+            label: `${event.agent} response`,
+            content: trimBlock(event.summary.trim(), 900),
+            tone: "muted",
+            state: "done",
+          });
+        }
+
+        context.activeSubagents.pop();
+        return;
+      }
+      case "step-finish": {
+        const parentId = activeSubagent?.rootEventId ?? activeDelegateId;
+        if (!parentId || !event.text.trim()) {
+          return;
+        }
+
+        const stepEventId = appendActivity(id, {
+          parentId,
+          kind: "step",
+          label: `${event.agent} reasoning`,
+          tone: "muted",
+          state: "done",
+        });
+
+        appendActivity(id, {
+          parentId: stepEventId,
+          kind: "text",
+          label: "draft response",
+          content: trimBlock(event.text.trim(), 900),
+          tone: "muted",
+          state: "done",
+        });
+
+        if (activeSubagent) {
+          activeSubagent.currentStepId = undefined;
+        }
+        return;
+      }
+      case "tool-start": {
+        const parentId = activeSubagent?.rootEventId ?? activeDelegateId;
+        if (!parentId) {
+          return;
+        }
+
+        const toolEventId = appendActivity(id, {
+          parentId,
+          kind: "tool",
+          label: event.toolName,
+          content: formatStructuredValue(event.input),
+          tone: "tool",
+          state: "running",
+        });
+
+        if (activeSubagent) {
+          activeSubagent.toolEventIdsByCallId[event.toolCallId] = toolEventId;
+        }
+        return;
+      }
+      case "tool-finish": {
+        const toolEventId = activeSubagent?.toolEventIdsByCallId[event.toolCallId];
+        if (!activeSubagent || !toolEventId) {
+          return;
+        }
+
+        updateActivity(id, toolEventId, (item) => ({
+          ...item,
+          content: event.success
+            ? formatStructuredValue(event.output)
+            : formatStructuredValue(event.error),
+          state: event.success ? "done" : "error",
+          tone: event.success ? "tool" : "error",
+        }));
+        return;
+      }
+    }
+  };
+
   const appendDetail = (id: string, line: string) => {
     setTranscript((current) => {
       const nextTranscript = current.map((entry) =>
@@ -294,6 +510,7 @@ function App() {
     activeChatIdRef.current = chatId;
     setActiveChatId(chatId);
     setTranscript([]);
+    activityContextRef.current = {};
     setExpandedEntries({});
     resetComposer();
     setChatSessions((current) =>
@@ -324,6 +541,7 @@ function App() {
     activeChatIdRef.current = chatId;
     setActiveChatId(chatId);
     setTranscript(chat.transcript);
+    activityContextRef.current = {};
     setExpandedEntries({});
     resetComposer();
   };
@@ -358,6 +576,7 @@ function App() {
         activeChatIdRef.current = initialActiveChat.id;
         setActiveChatId(initialActiveChat.id);
         setTranscript(initialActiveChat.transcript);
+        activityContextRef.current = {};
       } else {
         const chatId = makeId();
         const chat = await createChatSession({
@@ -383,6 +602,7 @@ function App() {
         activeChatIdRef.current = chat.id;
         setActiveChatId(chat.id);
         setTranscript([]);
+        activityContextRef.current = {};
       }
 
       setBooting(false);
@@ -562,7 +782,10 @@ function App() {
         reasoning: "",
         tools: [],
         details: [],
+        activity: [],
       });
+      activityContextRef.current[outputId] = createOutputActivityContext();
+      setExpanded(outputId, true);
 
       const record = await getGoogleConnectorRecord((line) =>
         appendDetail(outputId, line),
@@ -575,22 +798,55 @@ function App() {
         const mainAgent = buildMainAgent({
           directTools,
           googleTools: mcpSession?.tools ?? {},
-          emitStatus: (line) => appendDetail(outputId, line),
+          emitStatus: (event) => handleAgentStatusEvent(outputId, event),
         });
 
         const result = await mainAgent.stream({
           prompt: trimmed,
           abortSignal: abortController.signal,
         });
-        appendDetail(outputId, "Streaming assistant response...");
 
         for await (const part of result.fullStream) {
+          const context = ensureActivityContext(outputId);
+
           switch (part.type) {
+            case "start-step": {
+              const activeSubagent =
+                context.activeSubagents[context.activeSubagents.length - 1];
+              const stepEventId = appendActivity(outputId, {
+                parentId: activeSubagent?.rootEventId,
+                kind: "step",
+                label: "model step",
+                tone: "muted",
+                state: "running",
+              });
+
+              if (activeSubagent) {
+                activeSubagent.currentStepId = stepEventId;
+              } else {
+                context.currentStepId = stepEventId;
+              }
+              break;
+            }
             case "text-delta":
               updateTranscript(outputId, (entry) => ({
                 ...entry,
                 content: entry.content + readStreamText(part),
               }));
+              if (!context.textEventIdsByStreamId[part.id]) {
+                context.textEventIdsByStreamId[part.id] = appendActivity(outputId, {
+                  parentId: getActiveParentId(context),
+                  kind: "text",
+                  label: "assistant output",
+                  tone: "default",
+                  state: "running",
+                });
+              }
+              appendActivityContent(
+                outputId,
+                context.textEventIdsByStreamId[part.id],
+                readStreamText(part),
+              );
               break;
             case "reasoning-delta":
               updateTranscript(outputId, (entry) => ({
@@ -599,31 +855,153 @@ function App() {
                   (entry.reasoning ?? "") + readStreamText(part),
                 ),
               }));
+              if (!context.reasoningEventIdsByStreamId[part.id]) {
+                context.reasoningEventIdsByStreamId[part.id] = appendActivity(outputId, {
+                  parentId: getActiveParentId(context),
+                  kind: "reasoning",
+                  label: "reasoning",
+                  tone: "reasoning",
+                  state: "running",
+                });
+              }
+              appendActivityContent(
+                outputId,
+                context.reasoningEventIdsByStreamId[part.id],
+                readStreamText(part),
+              );
+              break;
+            case "reasoning-end":
+              if (context.reasoningEventIdsByStreamId[part.id]) {
+                updateActivity(
+                  outputId,
+                  context.reasoningEventIdsByStreamId[part.id],
+                  (event) => ({ ...event, state: "done" }),
+                );
+              }
+              break;
+            case "text-end":
+              if (context.textEventIdsByStreamId[part.id]) {
+                updateActivity(outputId, context.textEventIdsByStreamId[part.id], (event) => ({
+                  ...event,
+                  state: "done",
+                }));
+              }
+              break;
+            case "tool-input-start": {
+              const toolEventId = appendActivity(outputId, {
+                parentId: getActiveParentId(context),
+                kind: "tool",
+                label: part.toolName,
+                tone: "tool",
+                state: "running",
+              });
+              context.toolEventIdsByCallId[part.id] = toolEventId;
+              if (isDelegateTool(part.toolName)) {
+                context.activeDelegateEventIds.push(toolEventId);
+              }
+              break;
+            }
+            case "tool-input-delta":
+              if (context.toolEventIdsByCallId[part.id]) {
+                appendActivityContent(
+                  outputId,
+                  context.toolEventIdsByCallId[part.id],
+                  part.delta,
+                  1200,
+                );
+              }
               break;
             case "tool-call":
-              appendDetail(outputId, `Tool call • ${part.toolName}`);
               updateTranscript(outputId, (entry) => ({
                 ...entry,
                 tools: entry.tools?.includes(part.toolName)
                   ? entry.tools
                   : [...(entry.tools ?? []), part.toolName],
               }));
+              if (!context.toolEventIdsByCallId[part.toolCallId]) {
+                const toolEventId = appendActivity(outputId, {
+                  parentId: getActiveParentId(context),
+                  kind: "tool",
+                  label: part.toolName,
+                  content: formatStructuredValue(part.input),
+                  tone: "tool",
+                  state: "running",
+                });
+                context.toolEventIdsByCallId[part.toolCallId] = toolEventId;
+                if (isDelegateTool(part.toolName)) {
+                  context.activeDelegateEventIds.push(toolEventId);
+                }
+              } else {
+                updateActivity(outputId, context.toolEventIdsByCallId[part.toolCallId], (event) => ({
+                  ...event,
+                  content: formatStructuredValue(part.input),
+                }));
+              }
               break;
             case "tool-result":
-              appendDetail(outputId, `Tool finished • ${part.toolName}`);
+              if (context.toolEventIdsByCallId[part.toolCallId]) {
+                updateActivity(outputId, context.toolEventIdsByCallId[part.toolCallId], (event) => ({
+                  ...event,
+                  content: formatStructuredValue(part.output),
+                  state: part.preliminary ? "running" : "done",
+                }));
+              }
+              if (!part.preliminary && isDelegateTool(part.toolName)) {
+                const activeDelegateId =
+                  context.activeDelegateEventIds[context.activeDelegateEventIds.length - 1];
+                if (activeDelegateId === context.toolEventIdsByCallId[part.toolCallId]) {
+                  context.activeDelegateEventIds.pop();
+                }
+              }
               break;
+            case "tool-error":
+              if (context.toolEventIdsByCallId[part.toolCallId]) {
+                updateActivity(outputId, context.toolEventIdsByCallId[part.toolCallId], (event) => ({
+                  ...event,
+                  content: formatStructuredValue(part.error),
+                  state: "error",
+                  tone: "error",
+                }));
+              }
+              break;
+            case "finish-step": {
+              const activeSubagent =
+                context.activeSubagents[context.activeSubagents.length - 1];
+              const stepId = activeSubagent?.currentStepId ?? context.currentStepId;
+              if (stepId) {
+                updateActivity(outputId, stepId, (event) => ({
+                  ...event,
+                  label: `model step ${part.finishReason}`,
+                  state: "done",
+                }));
+              }
+              if (activeSubagent) {
+                activeSubagent.currentStepId = undefined;
+              } else {
+                context.currentStepId = undefined;
+              }
+              break;
+            }
             case "error":
-              appendDetail(
-                outputId,
-                `Stream error • ${
+              appendActivity(outputId, {
+                parentId: getActiveParentId(context),
+                kind: "error",
+                label: "stream error",
+                content:
                   part.error instanceof Error
                     ? part.error.message
-                    : String(part.error)
-                }`,
-              );
+                    : String(part.error),
+                tone: "error",
+                state: "error",
+              });
               break;
             case "finish":
-              appendDetail(outputId, "Turn finished");
+              appendActivity(outputId, {
+                kind: "status",
+                label: "turn finished",
+                tone: "muted",
+                state: "done",
+              });
               break;
           }
         }

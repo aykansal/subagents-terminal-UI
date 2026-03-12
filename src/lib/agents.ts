@@ -2,15 +2,48 @@ import { stepCountIs, ToolLoopAgent, tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { models } from "../env";
 
+export type AgentStatusEvent =
+  | {
+      type: "delegate-start";
+      agent: string;
+      task: string;
+    }
+  | {
+      type: "delegate-finish";
+      agent: string;
+      summary: string;
+    }
+  | {
+      type: "step-finish";
+      agent: string;
+      text: string;
+    }
+  | {
+      type: "tool-start";
+      agent: string;
+      toolName: string;
+      toolCallId: string;
+      input: unknown;
+    }
+  | {
+      type: "tool-finish";
+      agent: string;
+      toolName: string;
+      toolCallId: string;
+      output?: unknown;
+      error?: unknown;
+      success: boolean;
+    };
+
 type BuildMainAgentOptions = {
   googleTools: ToolSet;
   directTools: ToolSet;
-  emitStatus: (message: string) => void;
+  emitStatus: (event: AgentStatusEvent) => void;
 };
 
 function createResearchAgent(
   directTools: ToolSet,
-  emitStatus: (message: string) => void,
+  emitStatus: (event: AgentStatusEvent) => void,
 ) {
   return new ToolLoopAgent({
     model: models.worker,
@@ -19,9 +52,33 @@ Use the direct tools when time, weather, or local task context would help.
 If a required tool is unavailable, say what information is missing instead of guessing.`,
     stopWhen: stepCountIs(4),
     tools: directTools,
+    experimental_onToolCallStart: ({ toolCall }) => {
+      emitStatus({
+        type: "tool-start",
+        agent: "research",
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        input: toolCall.input,
+      });
+    },
+    experimental_onToolCallFinish: ({ toolCall, success, output, error }) => {
+      emitStatus({
+        type: "tool-finish",
+        agent: "research",
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        success,
+        output,
+        error,
+      });
+    },
     onStepFinish: ({ text }) => {
       if (text?.trim()) {
-        emitStatus("Research subagent finished a reasoning step.");
+        emitStatus({
+          type: "step-finish",
+          agent: "research",
+          text: text.trim(),
+        });
       }
     },
   });
@@ -29,7 +86,7 @@ If a required tool is unavailable, say what information is missing instead of gu
 
 function createOperationsAgent(
   directTools: ToolSet,
-  emitStatus: (message: string) => void,
+  emitStatus: (event: AgentStatusEvent) => void,
 ) {
   return new ToolLoopAgent({
     model: models.worker,
@@ -38,9 +95,33 @@ Use the local task tools whenever a plan should become tracked work.
 Keep the output practical and short.`,
     stopWhen: stepCountIs(4),
     tools: directTools,
+    experimental_onToolCallStart: ({ toolCall }) => {
+      emitStatus({
+        type: "tool-start",
+        agent: "operations",
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        input: toolCall.input,
+      });
+    },
+    experimental_onToolCallFinish: ({ toolCall, success, output, error }) => {
+      emitStatus({
+        type: "tool-finish",
+        agent: "operations",
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        success,
+        output,
+        error,
+      });
+    },
     onStepFinish: ({ text }) => {
       if (text?.trim()) {
-        emitStatus("Operations subagent finished a reasoning step.");
+        emitStatus({
+          type: "step-finish",
+          agent: "operations",
+          text: text.trim(),
+        });
       }
     },
   });
@@ -48,7 +129,7 @@ Keep the output practical and short.`,
 
 function createTaskManagerAgent(
   directTools: ToolSet,
-  emitStatus: (message: string) => void,
+  emitStatus: (event: AgentStatusEvent) => void,
 ) {
   return new ToolLoopAgent({
     model: models.worker,
@@ -57,9 +138,33 @@ Prefer using task tools instead of only describing what should happen.
 When the request is ambiguous, inspect the current tasks first and act conservatively.`,
     stopWhen: stepCountIs(5),
     tools: directTools,
+    experimental_onToolCallStart: ({ toolCall }) => {
+      emitStatus({
+        type: "tool-start",
+        agent: "task manager",
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        input: toolCall.input,
+      });
+    },
+    experimental_onToolCallFinish: ({ toolCall, success, output, error }) => {
+      emitStatus({
+        type: "tool-finish",
+        agent: "task manager",
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        success,
+        output,
+        error,
+      });
+    },
     onStepFinish: ({ text }) => {
       if (text?.trim()) {
-        emitStatus("Task manager subagent finished a reasoning step.");
+        emitStatus({
+          type: "step-finish",
+          agent: "task manager",
+          text: text.trim(),
+        });
       }
     },
   });
@@ -67,7 +172,7 @@ When the request is ambiguous, inspect the current tasks first and act conservat
 
 function createDailyBriefAgent(
   directTools: ToolSet,
-  emitStatus: (message: string) => void,
+  emitStatus: (event: AgentStatusEvent) => void,
 ) {
   return new ToolLoopAgent({
     model: models.worker,
@@ -75,9 +180,33 @@ function createDailyBriefAgent(
 Use tools directly when they can improve the brief. Keep the output crisp and action-oriented.`,
     stopWhen: stepCountIs(5),
     tools: directTools,
+    experimental_onToolCallStart: ({ toolCall }) => {
+      emitStatus({
+        type: "tool-start",
+        agent: "daily brief",
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        input: toolCall.input,
+      });
+    },
+    experimental_onToolCallFinish: ({ toolCall, success, output, error }) => {
+      emitStatus({
+        type: "tool-finish",
+        agent: "daily brief",
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        success,
+        output,
+        error,
+      });
+    },
     onStepFinish: ({ text }) => {
       if (text?.trim()) {
-        emitStatus("Daily brief subagent finished a reasoning step.");
+        emitStatus({
+          type: "step-finish",
+          agent: "daily brief",
+          text: text.trim(),
+        });
       }
     },
   });
@@ -125,10 +254,19 @@ Be concise and explicit about when you delegated work.`,
           task: z.string().min(1),
         }),
         execute: async ({ task }, { abortSignal }) => {
-          emitStatus(`Main agent delegated research: ${task}`);
+          emitStatus({
+            type: "delegate-start",
+            agent: "research",
+            task,
+          });
           const result = await researchAgent.generate({
             prompt: task,
             abortSignal,
+          });
+          emitStatus({
+            type: "delegate-finish",
+            agent: "research",
+            summary: result.text,
           });
           return result.text;
         },
@@ -140,10 +278,19 @@ Be concise and explicit about when you delegated work.`,
           task: z.string().min(1),
         }),
         execute: async ({ task }, { abortSignal }) => {
-          emitStatus(`Main agent delegated ops work: ${task}`);
+          emitStatus({
+            type: "delegate-start",
+            agent: "operations",
+            task,
+          });
           const result = await operationsAgent.generate({
             prompt: task,
             abortSignal,
+          });
+          emitStatus({
+            type: "delegate-finish",
+            agent: "operations",
+            summary: result.text,
           });
           return result.text;
         },
@@ -155,10 +302,19 @@ Be concise and explicit about when you delegated work.`,
           task: z.string().min(1),
         }),
         execute: async ({ task }, { abortSignal }) => {
-          emitStatus(`Main agent delegated task management: ${task}`);
+          emitStatus({
+            type: "delegate-start",
+            agent: "task manager",
+            task,
+          });
           const result = await taskManagerAgent.generate({
             prompt: task,
             abortSignal,
+          });
+          emitStatus({
+            type: "delegate-finish",
+            agent: "task manager",
+            summary: result.text,
           });
           return result.text;
         },
@@ -170,10 +326,19 @@ Be concise and explicit about when you delegated work.`,
           task: z.string().min(1),
         }),
         execute: async ({ task }, { abortSignal }) => {
-          emitStatus(`Main agent delegated daily brief work: ${task}`);
+          emitStatus({
+            type: "delegate-start",
+            agent: "daily brief",
+            task,
+          });
           const result = await dailyBriefAgent.generate({
             prompt: task,
             abortSignal,
+          });
+          emitStatus({
+            type: "delegate-finish",
+            agent: "daily brief",
+            summary: result.text,
           });
           return result.text;
         },
