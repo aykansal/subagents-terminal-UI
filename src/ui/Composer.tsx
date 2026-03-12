@@ -1,7 +1,7 @@
 import type { InputRenderable } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
 import type { RefObject } from "react";
-import { uiColors, uiCopy, uiLayout, uiSpacing } from "./design-system";
+import { uiColors, uiCopy, uiLayout, uiSpacing } from "../lib/design-system";
 
 type ComposerProps = {
   busy: boolean;

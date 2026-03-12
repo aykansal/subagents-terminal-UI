@@ -1,7 +1,7 @@
 import { TextAttributes } from "@opentui/core";
-import { TranscriptEntry } from "./chat-types";
-import { formatBlock } from "./chat-utils";
-import { uiColors, uiCopy, uiSpacing } from "./design-system";
+import { type TranscriptEntry } from "../lib/chat-types";
+import { formatBlock } from "../lib/chat-utils";
+import { uiColors, uiCopy, uiSpacing } from "../lib/design-system";
 
 type TranscriptViewProps = {
   busy: boolean;
@@ -45,8 +45,8 @@ function TranscriptRow({
     <box
       style={{
         flexDirection: "column",
-        marginBottom: isLast ? 0 : 1,
-        paddingTop: isFirst ? 0 : 1,
+        marginBottom: isLast ? 0 : 0.15,
+        paddingTop: isFirst ? 0 : 0.15,
       }}
     >
       {!isFirst ? (
@@ -58,7 +58,7 @@ function TranscriptRow({
       <box
         style={{
           flexDirection: "column",
-          marginTop: isFirst ? 0 : 1,
+          marginTop: isFirst ? 0 : 0.15,
         }}
       >
         <text fg={accent}>
@@ -67,7 +67,7 @@ function TranscriptRow({
 
         {hasDetails ? (
           <box
-            style={{ flexDirection: "column", marginTop: 1 }}
+            style={{ flexDirection: "column", marginTop: 0.5}}
             onMouseDown={() => onToggleExpanded(entry.id)}
           >
             <text fg={uiColors.subtle} attributes={TextAttributes.DIM}>
@@ -80,7 +80,7 @@ function TranscriptRow({
               <box
                 style={{
                   flexDirection: "column",
-                  marginTop: 1,
+                  marginTop: 0.2,
                   paddingLeft: uiSpacing.inset,
                 }}
               >
@@ -146,8 +146,8 @@ export function TranscriptView({
       style={{
         flexGrow: 1,
         flexDirection: "column",
-        paddingTop: 1,
-        paddingBottom: 1,
+        paddingTop: 0.15,
+        paddingBottom: 0.15,
       }}
     >
       <scrollbox style={{ flexGrow: 1, paddingTop: 1, paddingBottom: 1 }}>

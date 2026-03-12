@@ -17,7 +17,7 @@ import {
 } from "./lib/oauth";
 import { AppHeader } from "./ui/AppHeader";
 import { Composer } from "./ui/Composer";
-import { type TranscriptEntry } from "./ui/chat-types";
+import { type TranscriptEntry } from "./lib/chat-types";
 import { StatusBar } from "./ui/StatusBar";
 import { TranscriptView } from "./ui/TranscriptView";
 
@@ -100,10 +100,8 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [composerKey, setComposerKey] = useState(0);
   const [draft, setDraft] = useState("");
-  const [authSummary, setAuthSummary] = useState("");
   const [googleConnected, setGoogleConnected] = useState(false);
   // "Checking saved Google token...",
-  const [lastUsage, setLastUsage] = useState("usage=idle");
   const [expandedEntries, setExpandedEntries] = useState<
     Record<string, boolean>
   >({});
@@ -200,11 +198,6 @@ function App() {
       const record = await getGoogleConnectorRecord();
       if (!cancelled) {
         setGoogleConnected(Boolean(record));
-        setAuthSummary(
-          record
-            ? `Google • DB: ${getDbPath()}`
-            : `Google • DB: ${getDbPath()}`,
-        );
       }
     })();
 
@@ -218,20 +211,6 @@ function App() {
   }, [busy, composerKey]);
 
   useKeyboard((key) => {
-    if (key.ctrl && key.name === "c") {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      } else if (oauthAbortControllerRef.current) {
-        oauthAbortControllerRef.current.abort();
-      } else {
-        appendTranscript({
-          role: "assistant",
-          title: "SYSTEM",
-          content: "Ctrl+C intercepted. Use /quit to exit.",
-        });
-      }
-    }
-
     if (key.name === "tab") {
       const lastAssistant = [...transcript]
         .reverse()
@@ -309,9 +288,6 @@ function App() {
             },
           );
           setGoogleConnected(true);
-          setAuthSummary(
-            `Google • token DB ${getDbPath()} • updated ${record.updatedAt}`,
-          );
           updateTranscript(outputId, (entry) => ({
             ...entry,
             content: "Google Workspace connected successfully.",
@@ -349,7 +325,6 @@ function App() {
             ].join("\n"),
           }));
           setGoogleConnected(false);
-          setAuthSummary(`Google • not connected • token DB ${getDbPath()}`);
           return;
         }
 
@@ -371,16 +346,12 @@ function App() {
           ].join("\n"),
         }));
         setGoogleConnected(true);
-        setAuthSummary(`Google • token DB ${getDbPath()}`);
         return;
       }
 
       if (trimmed === "/reset-auth") {
         await deleteConnectorRecord("google-workspace");
         setGoogleConnected(false);
-        setAuthSummary(
-          `Google • not connected • tokens will be written to ${getDbPath()}`,
-        );
         appendTranscript({
           role: "assistant",
           title: "AGENT",
@@ -457,23 +428,13 @@ function App() {
               );
               break;
             case "finish": {
-              const usage = formatUsage(part);
-              setLastUsage(usage);
-              updateTranscript(outputId, (entry) => ({
-                ...entry,
-                usage,
-              }));
-              appendDetail(outputId, `Turn finished • ${usage}`);
+              updateTranscript(outputId, (entry) => ({...entry}));
+              appendDetail(outputId, `Turn finished`);
               break;
             }
           }
         }
 
-        setAuthSummary(
-          record
-            ? `Google • token DB ${getDbPath()}`
-            : `Google • not connected • run /auth to enable MCP tools`,
-        );
         setGoogleConnected(Boolean(record));
       } finally {
         abortControllerRef.current = null;
@@ -531,7 +492,7 @@ function App() {
         }}
       />
       <StatusBar
-        authSummary={authSummary}
+        dbPath={getDbPath()}
         busy={busy}
         googleConnected={googleConnected}
       />

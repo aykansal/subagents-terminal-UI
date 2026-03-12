@@ -1,15 +1,15 @@
 import { TextAttributes } from "@opentui/core";
-import { uiColors, uiCopy, uiLayout } from "./design-system";
+import { uiColors, uiCopy, uiLayout } from "../lib/design-system";
 
 type StatusBarProps = {
   busy: boolean;
-  authSummary: string;
+  dbPath: string;
   googleConnected: boolean;
 };
 
 export function StatusBar({
   busy,
-  authSummary,
+  dbPath,
   googleConnected,
 }: StatusBarProps) {
   return (
@@ -33,10 +33,10 @@ export function StatusBar({
           fg={googleConnected ? uiColors.tool : uiColors.subtle}
           attributes={TextAttributes.BOLD}
         >
-          ●
+          ● 
         </text>
         <text fg={uiColors.subtle} attributes={TextAttributes.DIM}>
-          {authSummary}
+          Google • DB: {dbPath}
         </text>
       </box>
     </box>

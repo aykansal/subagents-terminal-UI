@@ -1,5 +1,5 @@
 import { TextAttributes } from "@opentui/core";
-import { uiColors, uiCopy, uiLayout, uiSpacing } from "./design-system";
+import { uiColors, uiCopy, uiLayout, uiSpacing } from "../lib/design-system";
 
 type AppHeaderProps = {
   divider: string;
