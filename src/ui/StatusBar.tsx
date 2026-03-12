@@ -3,9 +3,15 @@ import { uiColors, uiCopy, uiLayout } from "./design-system";
 
 type StatusBarProps = {
   busy: boolean;
+  authSummary: string;
+  googleConnected: boolean;
 };
 
-export function StatusBar({ busy }: StatusBarProps) {
+export function StatusBar({
+  busy,
+  authSummary,
+  googleConnected,
+}: StatusBarProps) {
   return (
     <box
       style={{
@@ -17,6 +23,22 @@ export function StatusBar({ busy }: StatusBarProps) {
       <text fg={uiColors.subtle} attributes={TextAttributes.DIM}>
         Mode:{busy ? "running" : "idle"} • {uiCopy.statusCommands}
       </text>
+      <box
+        style={{
+          flexDirection: "row",
+          gap: 1,
+        }}
+      >
+        <text
+          fg={googleConnected ? uiColors.tool : uiColors.subtle}
+          attributes={TextAttributes.BOLD}
+        >
+          ●
+        </text>
+        <text fg={uiColors.subtle} attributes={TextAttributes.DIM}>
+          {authSummary}
+        </text>
+      </box>
     </box>
   );
 }

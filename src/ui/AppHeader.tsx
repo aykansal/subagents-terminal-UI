@@ -2,26 +2,20 @@ import { TextAttributes } from "@opentui/core";
 import { uiColors, uiCopy, uiLayout, uiSpacing } from "./design-system";
 
 type AppHeaderProps = {
-  authSummary: string;
   divider: string;
 };
 
-export function AppHeader({ authSummary, divider }: AppHeaderProps) {
+export function AppHeader({ divider }: AppHeaderProps) {
   return (
     <box
       style={{
         height: uiLayout.headerHeight,
         flexDirection: "column",
-        justifyContent: "center",
+        justifyContent: "space-between",
         paddingTop: uiSpacing.base,
       }}
     >
-      <text fg={uiColors.title}>
-        <strong>{uiCopy.appTitle}</strong>
-      </text>
-      <text fg={uiColors.muted} attributes={TextAttributes.DIM}>
-        {authSummary}
-      </text>
+      <ascii-font font="tiny" color={uiColors.primary} text={uiCopy.appTitle} />
       <text fg={uiColors.divider} attributes={TextAttributes.DIM}>
         {divider}
       </text>

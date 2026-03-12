@@ -1,13 +1,14 @@
 export const uiColors = {
   divider: "#3f3f46",
   title: "#f5f5f5",
-  text: "#e5e7eb",
+  text: "#D9D4C9",
   userText: "#f4f4f5",
   muted: "#a1a1aa",
   subtle: "#71717a",
   tool: "#34d399",
   action: "#60a5fa",
   reasoning: "#a78bfa",
+  primary:"#C96442"
 } as const;
 
 export const uiSpacing = {
@@ -16,13 +17,13 @@ export const uiSpacing = {
 } as const;
 
 export const uiLayout = {
-  headerHeight: 3,
+  headerHeight: 5,
   composerHeight: 4,
   statusHeight: 4,
 } as const;
 
 export const uiCopy = {
-  appTitle: "subagents",
+  appTitle: "June Subagents",
   composerPlaceholderIdle: "Enter prompt here",
   composerPlaceholderBusy: "Agent is running...",
   authCopyHint:

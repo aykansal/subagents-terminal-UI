@@ -96,22 +96,13 @@ function App() {
   const tuiRenderer = useRenderer();
   const { width } = useTerminalDimensions();
   const directTools = useMemo(() => createDirectTools(), []);
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([
-    {
-      id: makeId(),
-      role: "assistant",
-      title: "SYSTEM",
-      content:
-        "Commands: /auth, /tools, /reset-auth, /quit. Direct tools are available even without Google auth. ctrl+C cancels a running turn or shows a hint.",
-      createdAt: new Date().toISOString(),
-    },
-  ]);
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [composerKey, setComposerKey] = useState(0);
   const [draft, setDraft] = useState("");
-  const [authSummary, setAuthSummary] = useState(
-    "Checking saved Google token...",
-  );
+  const [authSummary, setAuthSummary] = useState("");
+  const [googleConnected, setGoogleConnected] = useState(false);
+  // "Checking saved Google token...",
   const [lastUsage, setLastUsage] = useState("usage=idle");
   const [expandedEntries, setExpandedEntries] = useState<
     Record<string, boolean>
@@ -208,10 +199,11 @@ function App() {
     void (async () => {
       const record = await getGoogleConnectorRecord();
       if (!cancelled) {
+        setGoogleConnected(Boolean(record));
         setAuthSummary(
           record
-            ? `Google connected • token DB ${getDbPath()}`
-            : `Google disconnected • tokens will be written to ${getDbPath()}`,
+            ? `Google • DB: ${getDbPath()}`
+            : `Google • DB: ${getDbPath()}`,
         );
       }
     })();
@@ -316,8 +308,9 @@ function App() {
               },
             },
           );
+          setGoogleConnected(true);
           setAuthSummary(
-            `Google connected • token DB ${getDbPath()} • updated ${record.updatedAt}`,
+            `Google • token DB ${getDbPath()} • updated ${record.updatedAt}`,
           );
           updateTranscript(outputId, (entry) => ({
             ...entry,
@@ -355,6 +348,8 @@ function App() {
               "- Not connected. Run /auth first.",
             ].join("\n"),
           }));
+          setGoogleConnected(false);
+          setAuthSummary(`Google • not connected • token DB ${getDbPath()}`);
           return;
         }
 
@@ -375,14 +370,16 @@ function App() {
                 )),
           ].join("\n"),
         }));
-        setAuthSummary(`Google connected • token DB ${getDbPath()}`);
+        setGoogleConnected(true);
+        setAuthSummary(`Google • token DB ${getDbPath()}`);
         return;
       }
 
       if (trimmed === "/reset-auth") {
         await deleteConnectorRecord("google-workspace");
+        setGoogleConnected(false);
         setAuthSummary(
-          `Google disconnected • tokens will be written to ${getDbPath()}`,
+          `Google • not connected • tokens will be written to ${getDbPath()}`,
         );
         appendTranscript({
           role: "assistant",
@@ -474,9 +471,10 @@ function App() {
 
         setAuthSummary(
           record
-            ? `Google connected • token DB ${getDbPath()}`
-            : `Google disconnected • run /auth to enable MCP tools`,
+            ? `Google • token DB ${getDbPath()}`
+            : `Google • not connected • run /auth to enable MCP tools`,
         );
+        setGoogleConnected(Boolean(record));
       } finally {
         abortControllerRef.current = null;
         await mcpSession?.client.close().catch(() => undefined);
@@ -513,7 +511,7 @@ function App() {
         paddingRight: 1,
       }}
     >
-      <AppHeader authSummary={authSummary} divider={divider} />
+      <AppHeader divider={divider} />
       <TranscriptView
         busy={busy}
         divider={divider}
@@ -532,7 +530,11 @@ function App() {
           void runPrompt(value);
         }}
       />
-      <StatusBar busy={busy} />
+      <StatusBar
+        authSummary={authSummary}
+        busy={busy}
+        googleConnected={googleConnected}
+      />
     </box>
   );
 }
