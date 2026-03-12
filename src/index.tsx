@@ -11,6 +11,7 @@ import { buildMainAgent, type AgentStatusEvent } from "./lib/agents";
 import {
   deriveChatTitle,
   formatStructuredValue,
+  getMessageTextContent,
 } from "./lib/chat-utils";
 import {
   createChatSession,
@@ -24,9 +25,10 @@ import {
 } from "./lib/db";
 import { createDirectTools } from "./lib/direct-tools";
 import type {
+  ChatMessage,
   ChatSessionSummary,
-  TranscriptActivityEvent,
-  TranscriptEntry,
+  DataOAuthPart,
+  MessagePart,
 } from "./lib/chat-types";
 import { createGoogleMcpSession, listGoogleMcpTools } from "./lib/mcp";
 import {
@@ -91,7 +93,7 @@ function sortChatSummaries(chats: ChatSessionSummary[]) {
   );
 }
 
-function summarizeChat(chatId: string, title: string, transcript: TranscriptEntry[]) {
+function summarizeChat(chatId: string, title: string, transcript: ChatMessage[]) {
   const timestamp =
     transcript[transcript.length - 1]?.createdAt ?? new Date().toISOString();
 
@@ -104,91 +106,28 @@ function summarizeChat(chatId: string, title: string, transcript: TranscriptEntr
   } satisfies ChatSessionSummary;
 }
 
-type ActiveSubagentContext = {
-  rootEventId: string;
-  currentStepId?: string;
-  toolEventIdsByCallId: Record<string, string>;
-};
-
 type OutputActivityContext = {
-  currentStepId?: string;
-  textEventIdsByStreamId: Record<string, string>;
-  reasoningEventIdsByStreamId: Record<string, string>;
   toolEventIdsByCallId: Record<string, string>;
-  activeDelegateEventIds: string[];
-  activeSubagents: ActiveSubagentContext[];
 };
 
 function createOutputActivityContext(): OutputActivityContext {
   return {
-    textEventIdsByStreamId: {},
-    reasoningEventIdsByStreamId: {},
     toolEventIdsByCallId: {},
-    activeDelegateEventIds: [],
-    activeSubagents: [],
   };
 }
 
-function isDelegateTool(toolName: string) {
-  return toolName.startsWith("delegate");
-}
-
-function normalizeTranscriptEntry(entry: TranscriptEntry): TranscriptEntry {
-  if (!entry.activity?.length) {
-    return entry;
-  }
-
-  const textEvents = entry.activity.filter(
-    (event) =>
-      event.kind === "text" &&
-      (event.label === "assistant output" || event.label === "main output"),
-  );
-  const lastTextEventId = textEvents[textEvents.length - 1]?.id;
-  const reasoningEvents = entry.activity.filter((event) => event.kind === "reasoning");
-  const lastReasoningEventId = reasoningEvents[reasoningEvents.length - 1]?.id;
-  let changed = false;
-
-  const activity = entry.activity.map((event) => {
-    if (
-      event.id === lastTextEventId &&
-      entry.content &&
-      event.content?.includes("[truncated]")
-    ) {
-      changed = true;
-      return {
-        ...event,
-        content: entry.content,
-      };
-    }
-
-    if (
-      event.id === lastReasoningEventId &&
-      entry.reasoning &&
-      event.content?.includes("[truncated]")
-    ) {
-      changed = true;
-      return {
-        ...event,
-        content: entry.reasoning,
-      };
-    }
-
-    return event;
-  });
-
-  return changed
-    ? {
-        ...entry,
-        activity,
-      }
-    : entry;
+function getOAuthFromMessage(msg: ChatMessage): DataOAuthPart["data"] | null {
+  const part = msg.parts?.find((p) => p.type === "data-oauth") as
+    | DataOAuthPart
+    | undefined;
+  return part ? part.data : null;
 }
 
 function App() {
   const tuiRenderer = useRenderer();
   const { width } = useTerminalDimensions();
   const directTools = useMemo(() => createDirectTools(), []);
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  const [transcript, setTranscript] = useState<ChatMessage[]>([]);
   const [chatSessions, setChatSessions] = useState<ChatSessionSummary[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -225,7 +164,7 @@ function App() {
   const queuePersist = (
     chatId: string,
     title: string,
-    nextTranscript: TranscriptEntry[],
+    nextTranscript: ChatMessage[],
   ) => {
     persistQueueRef.current = persistQueueRef.current
       .catch(() => undefined)
@@ -241,7 +180,7 @@ function App() {
       });
   };
 
-  const syncActiveChat = (nextTranscript: TranscriptEntry[], chatId?: string) => {
+  const syncActiveChat = (nextTranscript: ChatMessage[], chatId?: string) => {
     const resolvedChatId = chatId ?? activeChatIdRef.current;
     if (!resolvedChatId) {
       return;
@@ -264,10 +203,10 @@ function App() {
   };
 
   const appendTranscript = (
-    entry: Omit<TranscriptEntry, "id" | "createdAt">,
+    entry: Omit<ChatMessage, "id" | "createdAt">,
   ): string => {
     const id = makeId();
-    const nextEntry: TranscriptEntry = {
+    const nextEntry: ChatMessage = {
       ...entry,
       id,
       createdAt: new Date().toISOString(),
@@ -283,7 +222,7 @@ function App() {
 
   const updateTranscript = (
     id: string,
-    updater: (entry: TranscriptEntry) => TranscriptEntry,
+    updater: (entry: ChatMessage) => ChatMessage,
   ) => {
     setTranscript((current) => {
       const nextTranscript = current.map((entry) =>
@@ -295,17 +234,21 @@ function App() {
   };
 
   const setActionStatus = (id: string, actionStatus: string) => {
-    setTranscript((current) => {
-      const nextTranscript = current.map((entry) =>
-        entry.id === id
-          ? {
-              ...entry,
-              actionStatus,
-            }
-          : entry,
-      );
-      syncActiveChat(nextTranscript);
-      return nextTranscript;
+    updateTranscript(id, (msg) => {
+      const parts: MessagePart[] = [...(msg.parts ?? [])];
+      const oauthPart = parts.find((p) => p.type === "data-oauth") as
+        | DataOAuthPart
+        | undefined;
+      const data: DataOAuthPart["data"] = oauthPart
+        ? { ...oauthPart.data, actionStatus }
+        : { actionStatus };
+      if (oauthPart) {
+        const idx = parts.indexOf(oauthPart);
+        if (idx >= 0) parts[idx] = { type: "data-oauth", data };
+      } else {
+        parts.push({ type: "data-oauth", data });
+      }
+      return { ...msg, parts };
     });
   };
 
@@ -332,184 +275,28 @@ function App() {
     return next;
   };
 
-  const appendActivity = (
-    id: string,
-    event: Omit<TranscriptActivityEvent, "id">,
-  ) => {
-    const eventId = makeId();
-
-    updateTranscript(id, (entry) => ({
-      ...entry,
-      activity: [...(entry.activity ?? []), { ...event, id: eventId }],
-    }));
-
-    return eventId;
-  };
-
-  const updateActivity = (
-    id: string,
-    eventId: string,
-    updater: (event: TranscriptActivityEvent) => TranscriptActivityEvent,
-  ) => {
-    updateTranscript(id, (entry) => ({
-      ...entry,
-      activity: (entry.activity ?? []).map((event) =>
-        event.id === eventId ? updater(event) : event,
-      ),
-    }));
-  };
-
-  const appendActivityContent = (
-    id: string,
-    eventId: string,
-    value: string,
-  ) => {
-    updateActivity(id, eventId, (event) => ({
-      ...event,
-      content: `${event.content ?? ""}${value}`,
-    }));
-  };
-
-  const getActiveParentId = (context: OutputActivityContext) => {
-    const activeSubagent =
-      context.activeSubagents[context.activeSubagents.length - 1];
-
-    return activeSubagent?.currentStepId ??
-      activeSubagent?.rootEventId ??
-      context.currentStepId;
-  };
-
-  const handleAgentStatusEvent = (id: string, event: AgentStatusEvent) => {
-    const context = ensureActivityContext(id);
-    const activeDelegateId =
-      context.activeDelegateEventIds[context.activeDelegateEventIds.length - 1];
-    const activeSubagent =
-      context.activeSubagents[context.activeSubagents.length - 1];
-
-    switch (event.type) {
-      case "delegate-start": {
-        if (!activeDelegateId) {
-          return;
-        }
-
-        const rootEventId = appendActivity(id, {
-          parentId: activeDelegateId,
-          kind: "status",
-          label: `${event.agent} subagent`,
-          content: event.task,
-          tone: "action",
-          state: "running",
-        });
-
-        context.activeSubagents.push({
-          rootEventId,
-          toolEventIdsByCallId: {},
-        });
-        return;
-      }
-      case "delegate-finish": {
-        if (!activeSubagent) {
-          return;
-        }
-
-        updateActivity(id, activeSubagent.rootEventId, (item) => ({
-          ...item,
-          state: "done",
-        }));
-
-        if (event.summary.trim()) {
-          appendActivity(id, {
-            parentId: activeSubagent.rootEventId,
-            kind: "result",
-            label: `${event.agent} response`,
-            content: event.summary.trim(),
-            tone: "muted",
-            state: "done",
-          });
-        }
-
-        context.activeSubagents.pop();
-        return;
-      }
-      case "step-finish": {
-        const parentId = activeSubagent?.rootEventId ?? activeDelegateId;
-        if (!parentId || !event.text.trim()) {
-          return;
-        }
-
-        const stepEventId = appendActivity(id, {
-          parentId,
-          kind: "step",
-          label: `${event.agent} step`,
-          tone: "muted",
-          state: "done",
-        });
-
-        appendActivity(id, {
-          parentId: stepEventId,
-          kind: "text",
-          label: `${event.agent} output`,
-          content: event.text.trim(),
-          tone: "muted",
-          state: "done",
-        });
-
-        if (activeSubagent) {
-          activeSubagent.currentStepId = undefined;
-        }
-        return;
-      }
-      case "tool-start": {
-        const parentId = activeSubagent?.rootEventId ?? activeDelegateId;
-        if (!parentId) {
-          return;
-        }
-
-        const toolEventId = appendActivity(id, {
-          parentId,
-          kind: "tool",
-          label: `tool ${event.toolName}`,
-          content: formatStructuredValue(event.input, Number.POSITIVE_INFINITY),
-          tone: "tool",
-          state: "running",
-        });
-
-        if (activeSubagent) {
-          activeSubagent.toolEventIdsByCallId[event.toolCallId] = toolEventId;
-        }
-        return;
-      }
-      case "tool-finish": {
-        const toolEventId = activeSubagent?.toolEventIdsByCallId[event.toolCallId];
-        if (!activeSubagent || !toolEventId) {
-          return;
-        }
-
-        updateActivity(id, toolEventId, (item) => ({
-          ...item,
-          content: event.success
-            ? formatStructuredValue(event.output, Number.POSITIVE_INFINITY)
-            : formatStructuredValue(event.error, Number.POSITIVE_INFINITY),
-          state: event.success ? "done" : "error",
-          tone: event.success ? "tool" : "error",
-        }));
-        return;
-      }
-    }
+  const handleAgentStatusEvent = (_id: string, _event: AgentStatusEvent) => {
+    // Status events (delegate-start/finish, step-finish, tool-start/finish) are
+    // reflected in tool-invocation parts from the stream; no separate activity tree.
   };
 
   const appendDetail = (id: string, line: string) => {
-    setTranscript((current) => {
-      const nextTranscript = current.map((entry) =>
-        entry.id === id
-          ? {
-              ...entry,
-              details: [...(entry.details ?? []), line].slice(-24),
-            }
-          : entry,
+    updateTranscript(id, (msg) => {
+      const parts: MessagePart[] = [...(msg.parts ?? [])];
+      const detailsPart = parts.find(
+        (p): p is Extract<MessagePart, { type: "data-details" }> =>
+          p.type === "data-details",
       );
-      syncActiveChat(nextTranscript);
-      return nextTranscript;
+      const nextLines = detailsPart
+        ? [...detailsPart.data, line].slice(-24)
+        : [line];
+      if (detailsPart) {
+        const idx = parts.indexOf(detailsPart);
+        if (idx >= 0) parts[idx] = { type: "data-details", data: nextLines };
+      } else {
+        parts.push({ type: "data-details", data: nextLines });
+      }
+      return { ...msg, parts };
     });
   };
 
@@ -592,7 +379,7 @@ function App() {
     await setActiveChatSession(chatId);
     activeChatIdRef.current = chatId;
     setActiveChatId(chatId);
-    setTranscript(chat.transcript.map(normalizeTranscriptEntry));
+    setTranscript(chat.transcript);
     activityContextRef.current = {};
     setExpandedEntries({});
     setCollapsedActivityNodes({});
@@ -628,7 +415,7 @@ function App() {
         setChatSessions(summaries);
         activeChatIdRef.current = initialActiveChat.id;
         setActiveChatId(initialActiveChat.id);
-        setTranscript(initialActiveChat.transcript.map(normalizeTranscriptEntry));
+        setTranscript(initialActiveChat.transcript);
         activityContextRef.current = {};
         setCollapsedActivityNodes({});
       } else {
@@ -688,9 +475,10 @@ function App() {
     if (key.ctrl && key.name === "y") {
       const lastActionable = [...transcript]
         .reverse()
-        .find((entry) => entry.actionValue);
-      if (lastActionable?.actionValue) {
-        copyAuthValue(lastActionable.id, lastActionable.actionValue);
+        .find((m) => getOAuthFromMessage(m)?.actionValue);
+      const oauth = lastActionable && getOAuthFromMessage(lastActionable);
+      if (lastActionable && oauth?.actionValue) {
+        copyAuthValue(lastActionable.id, oauth.actionValue);
       }
     }
 
@@ -722,18 +510,18 @@ function App() {
     resetComposer();
     appendTranscript({
       role: "user",
-      title: "YOU",
-      content: trimmed,
+      parts: [{ type: "text", text: trimmed }],
     });
 
     try {
       if (trimmed === "/auth") {
         const outputId = appendTranscript({
           role: "assistant",
-          title: "AGENT",
-          content: "Starting Google Workspace OAuth...",
-          details: [],
-          actionLabel: "copy this",
+          parts: [
+            { type: "text", text: "Starting Google Workspace OAuth..." },
+            { type: "data-oauth", data: { actionLabel: "copy this" } },
+            { type: "data-details", data: [] },
+          ],
         });
         setExpanded(outputId, true);
         appendDetail(
@@ -748,23 +536,42 @@ function App() {
             {
               signal: oauthAbortController.signal,
               onAuthorizationUrl: (url) => {
-                updateTranscript(outputId, (entry) => ({
-                  ...entry,
-                  actionValue: url,
-                  actionStatus: "Preparing clipboard copy...",
-                }));
+          updateTranscript(outputId, (msg) => {
+            const parts: MessagePart[] = msg.parts?.slice() ?? [];
+            const oauthPart = parts.find((p) => p.type === "data-oauth") as
+              | DataOAuthPart
+              | undefined;
+            const data = {
+              actionLabel: "copy this",
+              actionValue: url,
+              actionStatus: "Preparing clipboard copy...",
+            };
+            if (oauthPart) {
+              const idx = parts.indexOf(oauthPart);
+              if (idx >= 0) parts[idx] = { type: "data-oauth", data };
+            } else {
+              parts.push({ type: "data-oauth", data });
+            }
+            return { ...msg, parts };
+          });
                 copyAuthValue(outputId, url);
               },
             },
           );
           setGoogleConnected(true);
-          updateTranscript(outputId, (entry) => ({
-            ...entry,
-            content: "Google Workspace connected successfully.",
-            actionValue: undefined,
-            actionLabel: undefined,
-            actionStatus: undefined,
-          }));
+          updateTranscript(outputId, (msg) => {
+            const rest = (msg.parts ?? []).filter(
+              (p): p is Extract<MessagePart, { type: "data-details" }> =>
+                p.type === "data-details",
+            );
+            return {
+              ...msg,
+              parts: [
+                { type: "text", text: "Google Workspace connected successfully." },
+                ...rest,
+              ],
+            };
+          });
         } finally {
           oauthAbortControllerRef.current = null;
         }
@@ -774,9 +581,10 @@ function App() {
       if (trimmed === "/tools") {
         const outputId = appendTranscript({
           role: "assistant",
-          title: "AGENT",
-          content: "Loading direct tools and Google MCP tools...",
-          details: [],
+          parts: [
+            { type: "text", text: "Loading direct tools and Google MCP tools..." },
+            { type: "data-details", data: [] },
+          ],
         });
         const directToolNames = Object.keys(directTools).sort();
         const record = await getGoogleConnectorRecord((line) =>
@@ -784,37 +592,40 @@ function App() {
         );
 
         if (!record) {
-          updateTranscript(outputId, (entry) => ({
-            ...entry,
-            content: [
-              "Direct tools:",
-              ...directToolNames.map((toolName) => `- ${toolName}`),
-              "",
-              "Google MCP tools:",
-              "- Not connected. Run /auth first.",
-            ].join("\n"),
-          }));
+          updateTranscript(outputId, (msg) => {
+            const text =
+              "Direct tools:\n" +
+              directToolNames.map((n) => `- ${n}`).join("\n") +
+              "\n\nGoogle MCP tools:\n- Not connected. Run /auth first.";
+            const parts: MessagePart[] = (msg.parts ?? []).filter(
+              (p) => p.type !== "text",
+            );
+            parts.unshift({ type: "text", text });
+            return { ...msg, parts };
+          });
           setGoogleConnected(false);
           return;
         }
 
         const tools = await listGoogleMcpTools(record);
-        updateTranscript(outputId, (entry) => ({
-          ...entry,
-          content: [
-            "Direct tools:",
-            ...directToolNames.map((toolName) => `- ${toolName}`),
-            "",
-            "Google MCP tools:",
-            ...(tools.length === 0
-              ? ["- The Google MCP returned no tools."]
-              : tools.map((toolInfo) =>
-                  toolInfo.description
-                    ? `- ${toolInfo.name}: ${toolInfo.description}`
-                    : `- ${toolInfo.name}`,
-                )),
-          ].join("\n"),
-        }));
+        const text =
+          "Direct tools:\n" +
+          directToolNames.map((n) => `- ${n}`).join("\n") +
+          "\n\nGoogle MCP tools:\n" +
+          (tools.length === 0
+            ? "- The Google MCP returned no tools."
+            : tools
+                .map((t) =>
+                  t.description ? `- ${t.name}: ${t.description}` : `- ${t.name}`,
+                )
+                .join("\n"));
+        updateTranscript(outputId, (msg) => {
+          const parts: MessagePart[] = (msg.parts ?? []).filter(
+            (p) => p.type !== "text",
+          );
+          parts.unshift({ type: "text", text });
+          return { ...msg, parts };
+        });
         setGoogleConnected(true);
         return;
       }
@@ -824,20 +635,19 @@ function App() {
         setGoogleConnected(false);
         appendTranscript({
           role: "assistant",
-          title: "AGENT",
-          content: "Deleted the saved Google Workspace token.",
+          parts: [
+            {
+              type: "text",
+              text: "Deleted the saved Google Workspace token.",
+            },
+          ],
         });
         return;
       }
 
       const outputId = appendTranscript({
         role: "assistant",
-        title: "AGENT",
-        content: "",
-        reasoning: "",
-        tools: [],
-        details: [],
-        activity: [],
+        parts: [],
       });
       activityContextRef.current[outputId] = createOutputActivityContext();
       setExpanded(outputId, true);
@@ -865,196 +675,134 @@ function App() {
           const context = ensureActivityContext(outputId);
 
           switch (part.type) {
-            case "start-step": {
-              const activeSubagent =
-                context.activeSubagents[context.activeSubagents.length - 1];
-              const stepEventId = appendActivity(outputId, {
-                parentId: activeSubagent?.rootEventId,
-                kind: "step",
-                label: "main step",
-                tone: "muted",
-                state: "running",
+            case "start-step":
+              break;
+            case "text-delta": {
+              const delta = readStreamText(part);
+              updateTranscript(outputId, (msg) => {
+                const parts = [...(msg.parts ?? [])];
+                let idx = -1;
+                for (let i = parts.length - 1; i >= 0; i--) {
+                  if (parts[i]?.type === "text") {
+                    idx = i;
+                    break;
+                  }
+                }
+                const current = idx >= 0 ? parts[idx] : undefined;
+                if (current && current.type === "text") {
+                  parts[idx] = { type: "text", text: current.text + delta };
+                } else {
+                  parts.push({ type: "text", text: delta });
+                }
+                return { ...msg, parts };
               });
-
-              if (activeSubagent) {
-                activeSubagent.currentStepId = stepEventId;
-              } else {
-                context.currentStepId = stepEventId;
-              }
               break;
             }
-            case "text-delta":
-              updateTranscript(outputId, (entry) => ({
-                ...entry,
-                content: entry.content + readStreamText(part),
-              }));
-              if (!context.textEventIdsByStreamId[part.id]) {
-                context.textEventIdsByStreamId[part.id] = appendActivity(outputId, {
-                  parentId: getActiveParentId(context),
-                  kind: "text",
-                  label: "main output",
-                  tone: "default",
-                  state: "running",
-                });
-              }
-              appendActivityContent(
-                outputId,
-                context.textEventIdsByStreamId[part.id],
-                readStreamText(part),
-              );
+            case "reasoning-delta": {
+              const delta = readStreamText(part);
+              updateTranscript(outputId, (msg) => {
+                const parts = [...(msg.parts ?? [])];
+                const idx = parts.findIndex((p) => p.type === "reasoning");
+                if (idx >= 0 && parts[idx]?.type === "reasoning") {
+                  parts[idx] = {
+                    type: "reasoning",
+                    reasoning: parts[idx].reasoning + delta,
+                  };
+                } else {
+                  parts.push({ type: "reasoning", reasoning: delta });
+                }
+                return { ...msg, parts };
+              });
               break;
-            case "reasoning-delta":
-              updateTranscript(outputId, (entry) => ({
-                ...entry,
-                reasoning: (entry.reasoning ?? "") + readStreamText(part),
-              }));
-              if (!context.reasoningEventIdsByStreamId[part.id]) {
-                context.reasoningEventIdsByStreamId[part.id] = appendActivity(outputId, {
-                  parentId: getActiveParentId(context),
-                  kind: "reasoning",
-                  label: "reasoning",
-                  tone: "reasoning",
-                  state: "running",
-                });
-              }
-              appendActivityContent(
-                outputId,
-                context.reasoningEventIdsByStreamId[part.id],
-                readStreamText(part),
-              );
-              break;
+            }
             case "reasoning-end":
-              if (context.reasoningEventIdsByStreamId[part.id]) {
-                updateActivity(
-                  outputId,
-                  context.reasoningEventIdsByStreamId[part.id],
-                  (event) => ({ ...event, state: "done" }),
-                );
-              }
-              break;
             case "text-end":
-              if (context.textEventIdsByStreamId[part.id]) {
-                updateActivity(outputId, context.textEventIdsByStreamId[part.id], (event) => ({
-                  ...event,
-                  state: "done",
-                }));
-              }
               break;
-            case "tool-input-start": {
-              const toolEventId = appendActivity(outputId, {
-                  parentId: getActiveParentId(context),
-                  kind: "tool",
-                  label: `tool ${part.toolName}`,
-                  tone: "tool",
-                  state: "running",
-                });
-              context.toolEventIdsByCallId[part.id] = toolEventId;
-              if (isDelegateTool(part.toolName)) {
-                context.activeDelegateEventIds.push(toolEventId);
-              }
-              break;
-            }
+            case "tool-input-start":
             case "tool-input-delta":
-              if (context.toolEventIdsByCallId[part.id]) {
-                appendActivityContent(
-                  outputId,
-                  context.toolEventIdsByCallId[part.id],
-                  part.delta,
-                  // 1200,
-                );
-              }
               break;
             case "tool-call":
-              updateTranscript(outputId, (entry) => ({
-                ...entry,
-                tools: entry.tools?.includes(part.toolName)
-                  ? entry.tools
-                  : [...(entry.tools ?? []), part.toolName],
-              }));
               if (!context.toolEventIdsByCallId[part.toolCallId]) {
-                const toolEventId = appendActivity(outputId, {
-                  parentId: getActiveParentId(context),
-                  kind: "tool",
-                  label: `tool ${part.toolName}`,
-                  content: formatStructuredValue(part.input, Number.POSITIVE_INFINITY),
-                  tone: "tool",
-                  state: "running",
+                updateTranscript(outputId, (msg) => {
+                  const parts = [...(msg.parts ?? [])];
+                  parts.push({
+                    type: "tool-invocation",
+                    toolInvocation: {
+                      toolCallId: part.toolCallId,
+                      toolName: part.toolName,
+                      state: "call",
+                      args: part.input,
+                    },
+                  });
+                  return { ...msg, parts };
                 });
-                context.toolEventIdsByCallId[part.toolCallId] = toolEventId;
-                if (isDelegateTool(part.toolName)) {
-                  context.activeDelegateEventIds.push(toolEventId);
-                }
+                context.toolEventIdsByCallId[part.toolCallId] = part.toolCallId;
               } else {
-                updateActivity(outputId, context.toolEventIdsByCallId[part.toolCallId], (event) => ({
-                  ...event,
-                  content: formatStructuredValue(part.input, Number.POSITIVE_INFINITY),
-                }));
+                updateTranscript(outputId, (msg) => {
+                  const parts = [...(msg.parts ?? [])];
+                  const i = parts.findIndex(
+                    (p) =>
+                      p.type === "tool-invocation" &&
+                      p.toolInvocation.toolCallId === part.toolCallId,
+                  );
+                  if (i >= 0 && parts[i]?.type === "tool-invocation") {
+                    parts[i] = {
+                      ...parts[i],
+                      toolInvocation: {
+                        ...parts[i].toolInvocation,
+                        args: part.input,
+                      },
+                    };
+                  }
+                  return { ...msg, parts };
+                });
               }
               break;
             case "tool-result":
-              if (context.toolEventIdsByCallId[part.toolCallId]) {
-                updateActivity(outputId, context.toolEventIdsByCallId[part.toolCallId], (event) => ({
-                  ...event,
-                  content: formatStructuredValue(part.output, Number.POSITIVE_INFINITY),
-                  state: part.preliminary ? "running" : "done",
-                }));
-              }
-              if (!part.preliminary && isDelegateTool(part.toolName)) {
-                const activeDelegateId =
-                  context.activeDelegateEventIds[context.activeDelegateEventIds.length - 1];
-                if (activeDelegateId === context.toolEventIdsByCallId[part.toolCallId]) {
-                  context.activeDelegateEventIds.pop();
+              updateTranscript(outputId, (msg) => {
+                const parts = [...(msg.parts ?? [])];
+                const i = parts.findIndex(
+                  (p) =>
+                    p.type === "tool-invocation" &&
+                    p.toolInvocation.toolCallId === part.toolCallId,
+                );
+                if (i >= 0 && parts[i]?.type === "tool-invocation") {
+                  parts[i] = {
+                    ...parts[i],
+                    toolInvocation: {
+                      ...parts[i].toolInvocation,
+                      result: part.output,
+                      state: part.preliminary ? "partial-call" : "result",
+                    },
+                  };
                 }
-              }
+                return { ...msg, parts };
+              });
               break;
             case "tool-error":
-              if (context.toolEventIdsByCallId[part.toolCallId]) {
-                updateActivity(outputId, context.toolEventIdsByCallId[part.toolCallId], (event) => ({
-                  ...event,
-                  content: formatStructuredValue(part.error, Number.POSITIVE_INFINITY),
-                  state: "error",
-                  tone: "error",
-                }));
-              }
+              updateTranscript(outputId, (msg) => {
+                const parts = [...(msg.parts ?? [])];
+                const i = parts.findIndex(
+                  (p) =>
+                    p.type === "tool-invocation" &&
+                    p.toolInvocation.toolCallId === part.toolCallId,
+                );
+                if (i >= 0 && parts[i]?.type === "tool-invocation") {
+                  parts[i] = {
+                    ...parts[i],
+                    toolInvocation: {
+                      ...parts[i].toolInvocation,
+                      result: part.error,
+                      state: "result",
+                    },
+                  };
+                }
+                return { ...msg, parts };
+              });
               break;
-            case "finish-step": {
-              const activeSubagent =
-                context.activeSubagents[context.activeSubagents.length - 1];
-              const stepId = activeSubagent?.currentStepId ?? context.currentStepId;
-              if (stepId) {
-                updateActivity(outputId, stepId, (event) => ({
-                  ...event,
-                  label: `main step ${part.finishReason}`,
-                  state: "done",
-                }));
-              }
-              if (activeSubagent) {
-                activeSubagent.currentStepId = undefined;
-              } else {
-                context.currentStepId = undefined;
-              }
-              break;
-            }
+            case "finish-step":
             case "error":
-              appendActivity(outputId, {
-                parentId: getActiveParentId(context),
-                kind: "error",
-                label: "stream error",
-                content:
-                  part.error instanceof Error
-                    ? part.error.message
-                    : String(part.error),
-                tone: "error",
-                state: "error",
-              });
-              break;
             case "finish":
-              appendActivity(outputId, {
-                kind: "status",
-                label: "turn finished",
-                tone: "muted",
-                state: "done",
-              });
               break;
           }
         }
@@ -1068,17 +816,25 @@ function App() {
       if (error instanceof Error && error.name === "AbortError") {
         appendTranscript({
           role: "assistant",
-          title: "AGENT",
-          content:
-            oauthAbortControllerRef.current || !abortControllerRef.current
-              ? "Cancelled the current flow."
-              : "Cancelled the current run.",
+          parts: [
+            {
+              type: "text",
+              text:
+                oauthAbortControllerRef.current || !abortControllerRef.current
+                  ? "Cancelled the current flow."
+                  : "Cancelled the current run.",
+            },
+          ],
         });
       } else {
         appendTranscript({
           role: "assistant",
-          title: "AGENT",
-          content: error instanceof Error ? error.message : String(error),
+          parts: [
+            {
+              type: "text",
+              text: error instanceof Error ? error.message : String(error),
+            },
+          ],
         });
       }
     } finally {

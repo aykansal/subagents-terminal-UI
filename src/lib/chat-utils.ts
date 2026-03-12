@@ -1,42 +1,4 @@
-import type { TranscriptActivityEvent } from "./chat-types";
-
-export type OrderedTranscriptActivityEvent = TranscriptActivityEvent & {
-  children: OrderedTranscriptActivityEvent[];
-};
-
-export type FlattenedActivityItem =
-  | { type: "inline"; event: OrderedTranscriptActivityEvent }
-  | { type: "branch"; event: OrderedTranscriptActivityEvent };
-
-/**
- * Flattens the activity tree into a display sequence: text/reasoning as inline
- * (no collapsible branch), tool/result/error as collapsible branches. Steps are
- * transparent (children appear at the same level). Preserves LLM order.
- */
-export function flattenActivitySequence(
-  ordered: OrderedTranscriptActivityEvent[],
-): FlattenedActivityItem[] {
-  const out: FlattenedActivityItem[] = [];
-
-  const visit = (events: OrderedTranscriptActivityEvent[]) => {
-    for (const event of events) {
-      // Steps are transparent containers – we don't render them directly.
-      if (event.kind === "step") {
-        visit(event.children);
-        continue;
-      }
-
-      if (event.kind === "text" || event.kind === "reasoning") {
-        out.push({ type: "inline", event });
-        continue;
-      }
-      out.push({ type: "branch", event });
-    }
-  };
-
-  visit(ordered);
-  return out;
-}
+import type { ChatMessage } from "./chat-types";
 
 export function formatBlock(
   content: string,
@@ -51,22 +13,31 @@ export function formatBlock(
     .join("\n");
 }
 
+export function getMessageTextContent(msg: ChatMessage): string {
+  return (msg.parts ?? [])
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join("");
+}
+
 export function deriveChatTitle(
-  transcript: Array<{ role: "user" | "assistant"; content: string }>,
+  transcript: ChatMessage[],
   fallback = "New chat",
 ) {
   const firstUserMessage = transcript.find(
     (entry) =>
       entry.role === "user" &&
-      entry.content.trim().length > 0 &&
-      !entry.content.trim().startsWith("/"),
+      getMessageTextContent(entry).trim().length > 0 &&
+      !getMessageTextContent(entry).trim().startsWith("/"),
   );
 
   if (!firstUserMessage) {
     return fallback;
   }
 
-  const normalized = firstUserMessage.content.replace(/\s+/g, " ").trim();
+  const normalized = getMessageTextContent(firstUserMessage)
+    .replace(/\s+/g, " ")
+    .trim();
   return normalized.length <= 15
     ? normalized
     : `${normalized.slice(0, 15).trimEnd()}...`;
@@ -99,24 +70,4 @@ export function formatStructuredValue(value: unknown, maxChars = 240) {
       ? fallback
       : trimInline(fallback, maxChars);
   }
-}
-
-export function orderActivityTree(
-  events: TranscriptActivityEvent[],
-): OrderedTranscriptActivityEvent[] {
-  const byParent = new Map<string | undefined, TranscriptActivityEvent[]>();
-
-  for (const event of events) {
-    const group = byParent.get(event.parentId) ?? [];
-    group.push(event);
-    byParent.set(event.parentId, group);
-  }
-
-  const visit = (parentId?: string): OrderedTranscriptActivityEvent[] =>
-    (byParent.get(parentId) ?? []).map((event) => ({
-      ...event,
-      children: visit(event.id),
-    }));
-
-  return visit(undefined);
 }

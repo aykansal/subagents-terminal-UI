@@ -1,43 +1,53 @@
-export type TranscriptActivityTone =
-  | "default"
-  | "muted"
-  | "tool"
-  | "reasoning"
-  | "action"
-  | "error";
-
-export type TranscriptActivityState = "running" | "done" | "error";
-
-export type TranscriptActivityEvent = {
-  id: string;
-  parentId?: string;
-  kind:
-    | "step"
-    | "reasoning"
-    | "text"
-    | "tool"
-    | "status"
-    | "result"
-    | "error";
-  label: string;
-  content?: string;
-  tone?: TranscriptActivityTone;
-  state?: TranscriptActivityState;
+/** AI SDK–compatible message parts (junebot / UIMessage style). */
+export type DataOAuthPart = {
+  type: "data-oauth";
+  data: {
+    actionLabel?: string;
+    actionValue?: string;
+    actionStatus?: string;
+  };
 };
 
-export type TranscriptEntry = {
+export type MessagePart =
+  | { type: "text"; text: string }
+  | { type: "reasoning"; reasoning: string }
+  | {
+      type: "tool-invocation";
+      toolInvocation: {
+        toolCallId: string;
+        toolName: string;
+        args?: unknown;
+        result?: unknown;
+        state?: "call" | "result" | "partial-call";
+      };
+    }
+  | {
+      type: "data-webSearchSources";
+      data: Array<{ url: string; title?: string; description?: string }>;
+    }
+  | {
+      type: "data-webSearchQueries";
+      data: Array<{ query: string; timestamp?: string }>;
+    }
+  | {
+      type: "data-toolSources";
+      data: Array<{
+        url: string;
+        title?: string;
+        description?: string;
+        toolName?: string;
+        sourceType?: "mcp" | "document" | "memory" | "chat";
+      }>;
+    }
+  | { type: "data-usage"; data: unknown }
+  | DataOAuthPart
+  | { type: "data-details"; data: string[] };
+
+export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
-  title: string;
-  content: string;
-  reasoning?: string;
-  tools?: string[];
-  usage?: string;
-  details?: string[];
-  activity?: TranscriptActivityEvent[];
-  actionLabel?: string;
-  actionValue?: string;
-  actionStatus?: string;
+  parts: MessagePart[];
+  attachments?: unknown[];
   createdAt: string;
 };
 
@@ -50,5 +60,22 @@ export type ChatSessionSummary = {
 };
 
 export type ChatSessionRecord = ChatSessionSummary & {
-  transcript: TranscriptEntry[];
+  transcript: ChatMessage[];
+};
+
+/** Legacy format (for migration only). */
+export type TranscriptEntryLegacy = {
+  id: string;
+  role: "user" | "assistant";
+  title?: string;
+  content: string;
+  reasoning?: string;
+  tools?: string[];
+  usage?: string;
+  details?: string[];
+  activity?: unknown[];
+  actionLabel?: string;
+  actionValue?: string;
+  actionStatus?: string;
+  createdAt: string;
 };

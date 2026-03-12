@@ -1,7 +1,13 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { env } from "../env";
-import type { ChatSessionRecord, ChatSessionSummary, TranscriptEntry } from "./chat-types";
+import type {
+  ChatMessage,
+  ChatSessionRecord,
+  ChatSessionSummary,
+  MessagePart,
+  TranscriptEntryLegacy,
+} from "./chat-types";
 
 export type OAuthTokens = {
   access_token: string;
@@ -80,13 +86,137 @@ const DEFAULT_DB: DbShape = {
 
 let dbWriteQueue: Promise<unknown> = Promise.resolve();
 
+function stripTrailingCommas(raw: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+
+    if (escaped) {
+      result += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      result += char;
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      result += char;
+      inString = !inString;
+      continue;
+    }
+
+    if (!inString && char === ",") {
+      let lookahead = index + 1;
+      while (lookahead < raw.length && /\s/.test(raw[lookahead] ?? "")) {
+        lookahead += 1;
+      }
+
+      const nextChar = raw[lookahead];
+      if (nextChar === "]" || nextChar === "}") {
+        continue;
+      }
+    }
+
+    result += char;
+  }
+
+  return result;
+}
+
+function parseDbJson(raw: string): Partial<DbShape> & { chats?: unknown[] } {
+  try {
+    return JSON.parse(raw) as Partial<DbShape> & { chats?: unknown[] };
+  } catch (error) {
+    const repaired = stripTrailingCommas(raw);
+    if (repaired !== raw) {
+      return JSON.parse(repaired) as Partial<DbShape> & { chats?: unknown[] };
+    }
+    throw error;
+  }
+}
+
+function isLegacyTranscriptEntry(
+  entry: unknown,
+): entry is TranscriptEntryLegacy {
+  return (
+    typeof entry === "object" &&
+    entry !== null &&
+    "id" in entry &&
+    "role" in entry &&
+    "content" in entry &&
+    !("parts" in entry)
+  );
+}
+
+function migrateEntryToChatMessage(entry: TranscriptEntryLegacy): ChatMessage {
+  const parts: MessagePart[] = [];
+  const content = typeof entry.content === "string" ? entry.content : "";
+  if (content) {
+    parts.push({ type: "text", text: content });
+  }
+  if (entry.reasoning) {
+    parts.push({ type: "reasoning", reasoning: entry.reasoning });
+  }
+  if (entry.tools?.length) {
+    for (const toolName of entry.tools) {
+      parts.push({
+        type: "tool-invocation",
+        toolInvocation: {
+          toolCallId: `${entry.id}-${toolName}`,
+          toolName,
+          state: "result",
+        },
+      });
+    }
+  }
+  if (entry.usage) {
+    parts.push({ type: "data-usage", data: { raw: entry.usage } });
+  }
+  if (parts.length === 0) {
+    parts.push({ type: "text", text: "" });
+  }
+  return {
+    id: entry.id,
+    role: entry.role,
+    parts,
+    createdAt: entry.createdAt,
+  };
+}
+
+function migrateChatIfLegacy(chat: unknown): ChatSessionRecord {
+  const c = chat as Record<string, unknown>;
+  const transcript = (c.transcript as unknown[]) ?? [];
+  const migrated = transcript.map((entry) => {
+    if (isLegacyTranscriptEntry(entry)) {
+      return migrateEntryToChatMessage(entry);
+    }
+    return entry as ChatMessage;
+  });
+  return {
+    id: String(c.id),
+    title: String(c.title ?? ""),
+    createdAt: String(c.createdAt ?? ""),
+    updatedAt: String(c.updatedAt ?? ""),
+    transcript: migrated,
+    messageCount: Number(c.messageCount ?? migrated.length),
+  };
+}
+
 export async function readDb(): Promise<DbShape> {
   try {
     const raw = await readFile(DB_PATH, "utf8");
-    const parsed = JSON.parse(raw) as Partial<DbShape>;
+    const parsed = parseDbJson(raw);
+    const chats = (parsed.chats ?? []).map(migrateChatIfLegacy);
     return {
       activeChatId: parsed.activeChatId ?? null,
-      chats: parsed.chats ?? [],
+      chats,
       connectors: parsed.connectors ?? {},
       tasks: parsed.tasks ?? [],
     };
@@ -100,7 +230,9 @@ export async function readDb(): Promise<DbShape> {
 
 export async function writeDb(db: DbShape): Promise<void> {
   await mkdir(dirname(DB_PATH), { recursive: true });
-  await writeFile(DB_PATH, JSON.stringify(db, null, 2), "utf8");
+  const tempPath = `${DB_PATH}.tmp`;
+  await writeFile(tempPath, JSON.stringify(db, null, 2), "utf8");
+  await rename(tempPath, DB_PATH);
 }
 
 async function mutateDb<T>(
@@ -146,7 +278,7 @@ export async function getChatSession(chatId: string): Promise<ChatSessionRecord 
 
 export async function createChatSession(
   input: Pick<ChatSessionRecord, "id" | "title"> & {
-    transcript?: TranscriptEntry[];
+    transcript?: ChatMessage[];
     makeActive?: boolean;
   },
 ): Promise<ChatSessionRecord> {
@@ -173,7 +305,9 @@ export async function createChatSession(
 }
 
 export async function saveChatSession(
-  input: Pick<ChatSessionRecord, "id" | "title"> & { transcript: TranscriptEntry[] },
+  input: Pick<ChatSessionRecord, "id" | "title"> & {
+    transcript: ChatMessage[];
+  },
 ): Promise<ChatSessionRecord> {
   return mutateDb((db) => {
     const now = new Date().toISOString();

@@ -1,21 +1,13 @@
 import { TextAttributes } from "@opentui/core";
-import {
-  flattenActivitySequence,
-  formatBlock,
-  orderActivityTree,
-  type OrderedTranscriptActivityEvent,
-} from "../lib/chat-utils";
-import {
-  type TranscriptActivityEvent,
-  type TranscriptEntry,
-} from "../lib/chat-types";
+import { formatBlock, getMessageTextContent } from "../lib/chat-utils";
+import type { ChatMessage, MessagePart } from "../lib/chat-types";
 import { uiColors, uiCopy, uiSpacing } from "../lib/design-system";
 
 type TranscriptViewProps = {
   busy: boolean;
   collapsedActivityNodes: Record<string, boolean>;
   divider: string;
-  entries: TranscriptEntry[];
+  entries: ChatMessage[];
   expandedEntries: Record<string, boolean>;
   onToggleActivityNode: (id: string) => void;
   onToggleExpanded: (id: string) => void;
@@ -25,7 +17,7 @@ type TranscriptRowProps = {
   busy: boolean;
   collapsedActivityNodes: Record<string, boolean>;
   divider: string;
-  entry: TranscriptEntry;
+  entry: ChatMessage;
   expanded: boolean;
   isFirst: boolean;
   isLast: boolean;
@@ -33,203 +25,165 @@ type TranscriptRowProps = {
   onToggleExpanded: (id: string) => void;
 };
 
-type ActivityNodeProps = {
-  collapsedActivityNodes: Record<string, boolean>;
-  event: OrderedTranscriptActivityEvent;
-  isLast: boolean;
-  onToggleActivityNode: (id: string) => void;
-  trail: string;
-};
-
-function getActivityIcon(event: TranscriptActivityEvent) {
-  switch (event.kind) {
-    case "step":
-      return ">";
-    case "reasoning":
-      return "~";
+function getPartSummary(part: MessagePart): string {
+  switch (part.type) {
     case "text":
-      return "=";
-    case "tool":
-      return event.state === "running" ? "+" : "•";
-    case "result":
-      return "↳";
-    case "error":
-      return "!";
-    case "status":
-    default:
-      return "·";
-  }
-}
-
-function getActivityColor(event: TranscriptActivityEvent) {
-  if (event.state === "error" || event.kind === "error") {
-    return uiColors.error;
-  }
-
-  switch (event.tone) {
-    case "tool":
-      return uiColors.tool;
+      return part.text;
     case "reasoning":
-      return uiColors.reasoning;
-    case "action":
-      return uiColors.action;
-    case "muted":
-      return uiColors.muted;
+      return part.reasoning;
+    case "tool-invocation":
+      return `${part.toolInvocation.toolName}${part.toolInvocation.state === "result" ? " (done)" : ""}`;
+    case "data-usage":
+      return typeof part.data === "object" && part.data !== null && "raw" in part.data
+        ? String((part.data as { raw?: unknown }).raw ?? "")
+        : "";
+    case "data-oauth":
+      return part.data.actionLabel ?? "";
+    case "data-details":
+      return part.data.length ? "trace" : "";
+    case "data-webSearchSources":
+    case "data-webSearchQueries":
+    case "data-toolSources":
+      return "";
     default:
-      return uiColors.text;
+      return "";
   }
 }
 
-function renderActivityLine(prefix: string, value: string) {
-  return value
-    .split("\n")
-    .map((line, index) =>
-      `${index === 0 ? prefix : " ".repeat(prefix.length)}${line}`,
-    )
-    .join("\n");
+function formatUnknown(value: unknown) {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
-function ActivityNode({
-  collapsedActivityNodes,
-  event,
-  isLast,
-  onToggleActivityNode,
-  trail,
-}: ActivityNodeProps) {
-  const branch = `${trail}${isLast ? "└─" : "├─"}`;
-  const childTrail = `${trail}${isLast ? "  " : "│ "}`;
-  const isCollapsible = Boolean(event.content || event.children.length);
-  const collapsed = Boolean(collapsedActivityNodes[event.id]);
-  const toggleLabel = isCollapsible ? (collapsed ? "[+]" : "[-]") : "   ";
-  const suffix =
-    event.state === "running" ? "..." : event.state === "error" ? " (failed)" : "";
-  const label = `${toggleLabel} ${getActivityIcon(event)} ${event.label}${suffix}`;
-
-  return (
-    <box style={{ flexDirection: "column" }}>
-      <text
-        fg={getActivityColor(event)}
-        attributes={TextAttributes.NONE}
-        onMouseDown={() => {
-          if (isCollapsible) {
-            onToggleActivityNode(event.id);
-          }
-        }}
-      >
-        {renderActivityLine(branch, label)}
-      </text>
-
-      {event.content && !collapsed ? (
-        <text fg={getActivityColor(event)} attributes={TextAttributes.NONE}>
-          {formatBlock(event.content, `${childTrail}  `, `${childTrail}  `)}
+function renderTracePart(part: MessagePart, key: string) {
+  switch (part.type) {
+    case "text":
+      if (!part.text.trim()) {
+        return null;
+      }
+      return (
+        <text key={key} fg={uiColors.text} attributes={TextAttributes.NONE}>
+          {formatBlock(part.text, "=")}
         </text>
-      ) : null}
-
-      {!collapsed ? (
-        <ActivitySequence
-          collapsedActivityNodes={collapsedActivityNodes}
-          events={event.children}
-          onToggleActivityNode={onToggleActivityNode}
-          trail={childTrail}
-        />
-      ) : null}
-    </box>
-  );
-}
-
-function ActivitySequence({
-  collapsedActivityNodes,
-  events,
-  onToggleActivityNode,
-  trail,
-}: {
-  collapsedActivityNodes: Record<string, boolean>;
-  events: OrderedTranscriptActivityEvent[];
-  onToggleActivityNode: (id: string) => void;
-  trail: string;
-}) {
-  const sequence = flattenActivitySequence(events);
-  return (
-    <box style={{ flexDirection: "column" }}>
-      {sequence.map((item, index) => {
-        if (item.type === "inline") {
-          const { event } = item;
-          if (!event.content?.trim()) return null;
-          const prefix = event.kind === "reasoning" ? "~" : "=";
-          const linePrefix = trail ? `${trail}  ` : "";
-          return (
-            <text
-              key={event.id}
-              fg={uiColors.text}
-              attributes={TextAttributes.NONE}
-            >
-              {formatBlock(event.content, linePrefix + prefix, linePrefix)}
+      );
+    case "reasoning":
+      if (!part.reasoning.trim()) {
+        return null;
+      }
+      return (
+        <text key={key} fg={uiColors.reasoning} attributes={TextAttributes.NONE}>
+          {formatBlock(part.reasoning, "~")}
+        </text>
+      );
+    case "tool-invocation": {
+      const { toolInvocation } = part;
+      const running = toolInvocation.state !== "result";
+      return (
+        <box key={key} style={{ flexDirection: "column" }}>
+          <text fg={uiColors.tool} attributes={TextAttributes.NONE}>
+            {formatBlock(
+              `${running ? "+" : "•"} ${toolInvocation.toolName}${running ? "..." : ""}`,
+              " ",
+            )}
+          </text>
+          {toolInvocation.args !== undefined ? (
+            <text fg={uiColors.muted} attributes={TextAttributes.NONE}>
+              {formatBlock(formatUnknown(toolInvocation.args), "| args", "|     ")}
             </text>
-          );
-        }
-        return (
-          <ActivityNode
-            key={item.event.id}
-            collapsedActivityNodes={collapsedActivityNodes}
-            event={item.event}
-            isLast={index === sequence.length - 1}
-            onToggleActivityNode={onToggleActivityNode}
-            trail={trail}
-          />
-        );
-      })}
-    </box>
-  );
-}
-
-function ActivityTree({
-  collapsedActivityNodes,
-  events,
-  onToggleActivityNode,
-}: {
-  collapsedActivityNodes: Record<string, boolean>;
-  events: TranscriptActivityEvent[];
-  onToggleActivityNode: (id: string) => void;
-}) {
-  const ordered = orderActivityTree(events);
-  return (
-    <box style={{ flexDirection: "column", marginTop: 0.2 }}>
-      <ActivitySequence
-        collapsedActivityNodes={collapsedActivityNodes}
-        events={ordered}
-        onToggleActivityNode={onToggleActivityNode}
-        trail=""
-      />
-    </box>
-  );
+          ) : null}
+          {toolInvocation.result !== undefined ? (
+            <text fg={uiColors.muted} attributes={TextAttributes.NONE}>
+              {formatBlock(formatUnknown(toolInvocation.result), "| result", "|        ")}
+            </text>
+          ) : null}
+        </box>
+      );
+    }
+    case "data-usage": {
+      const summary = getPartSummary(part);
+      if (!summary) {
+        return null;
+      }
+      return (
+        <text key={key} fg={uiColors.subtle} attributes={TextAttributes.NONE}>
+          {formatBlock(summary, "·")}
+        </text>
+      );
+    }
+    case "data-oauth":
+      if (!part.data.actionLabel) {
+        return null;
+      }
+      return (
+        <box key={key} style={{ flexDirection: "column", marginTop: 0.5 }}>
+          <text fg={uiColors.action}>
+            {formatBlock(`[ ${part.data.actionLabel} ]`, "+")}
+          </text>
+          <text fg={uiColors.muted} attributes={TextAttributes.NONE}>
+            {formatBlock(part.data.actionStatus ?? uiCopy.authCopyHint, "|")}
+          </text>
+        </box>
+      );
+    case "data-details":
+      return (
+        <box key={key} style={{ flexDirection: "column" }}>
+          {part.data.map((line, detailIndex) => {
+            const isToolLine = line.includes("Tool");
+            return (
+              <text
+                key={`${key}-${detailIndex}`}
+                fg={isToolLine ? uiColors.tool : uiColors.muted}
+                attributes={TextAttributes.NONE}
+              >
+                {formatBlock(line, isToolLine ? "+" : "|")}
+              </text>
+            );
+          })}
+        </box>
+      );
+    case "data-webSearchSources":
+    case "data-webSearchQueries":
+    case "data-toolSources":
+      return null;
+    default:
+      return null;
+  }
 }
 
 function TranscriptRow({
   busy,
-  collapsedActivityNodes,
   divider,
   entry,
   expanded,
   isFirst,
   isLast,
-  onToggleActivityNode,
   onToggleExpanded,
 }: TranscriptRowProps) {
   const isUser = entry.role === "user";
-  const hasActivity = Boolean(entry.activity?.length);
-  const hasDetails =
-    hasActivity ||
-    Boolean(entry.reasoning) ||
-    Boolean(entry.tools?.length) ||
-    Boolean(entry.usage) ||
-    Boolean(entry.details?.length);
+  const parts = entry.parts ?? [];
+  const textContent = getMessageTextContent(entry);
+  const usagePart = parts.find(
+    (p): p is { type: "data-usage"; data: unknown } => p.type === "data-usage",
+  );
+
+  const hasTraceParts = parts.some(
+    (part) => part.type !== "text" || Boolean(textContent.trim()),
+  );
+  const hasExpandable = hasTraceParts || Boolean(usagePart);
+
   const marker = isUser ? ">" : "*";
   const accent = isUser ? uiColors.userText : uiColors.text;
   const summaryLine =
-    isUser || !hasActivity
-      ? entry.content || (!isUser && busy ? "Streaming..." : "")
+    isUser || !expanded
+      ? textContent || (!isUser && busy ? "Streaming..." : "")
       : "";
-  const label = entry.title === "SYSTEM" ? "[system] " : "";
 
   return (
     <box
@@ -253,27 +207,19 @@ function TranscriptRow({
       >
         {summaryLine ? (
           <text fg={accent}>
-            {formatBlock(`${label}${summaryLine}`, marker)}
+            {formatBlock(summaryLine, marker)}
           </text>
         ) : null}
 
-        {hasActivity ? (
-          <box style={{ flexDirection: "column", marginTop: 0.2 }}>
-            <ActivityTree
-              collapsedActivityNodes={collapsedActivityNodes}
-              events={entry.activity!}
-              onToggleActivityNode={onToggleActivityNode}
-            />
-          </box>
-        ) : hasDetails ? (
+        {hasExpandable ? (
           <box style={{ flexDirection: "column", marginTop: 0.5 }}>
             <text
               fg={uiColors.subtle}
               attributes={TextAttributes.NONE}
               onMouseDown={() => onToggleExpanded(entry.id)}
             >
-              {entry.usage
-                ? `${expanded ? "[-]" : "[+]"} ${entry.usage}`
+              {usagePart
+                ? `${expanded ? "[-]" : "[+]"} ${getPartSummary(usagePart)}`
                 : `${expanded ? "[-]" : "[+]"} trace`}
             </text>
 
@@ -285,47 +231,9 @@ function TranscriptRow({
                   paddingLeft: uiSpacing.inset,
                 }}
               >
-                {entry.reasoning ? (
-                  <text fg={uiColors.reasoning} attributes={TextAttributes.NONE}>
-                    {formatBlock(entry.reasoning, "~")}
-                  </text>
-                ) : null}
-
-                {!entry.activity?.length && entry.tools && entry.tools.length > 0 ? (
-                  <text fg={uiColors.tool}>
-                    {formatBlock(`tools ${entry.tools.join(", ")}`, "+")}
-                  </text>
-                ) : null}
-
-                {entry.actionLabel ? (
-                  <box style={{ flexDirection: "column", marginTop: 1 }}>
-                    <text fg={uiColors.action}>
-                      {formatBlock(`[ ${entry.actionLabel} ]`, "+")}
-                    </text>
-                    <text fg={uiColors.muted} attributes={TextAttributes.NONE}>
-                      {formatBlock(
-                        entry.actionStatus ?? uiCopy.authCopyHint,
-                        "|",
-                      )}
-                    </text>
-                  </box>
-                ) : null}
-
-                {!entry.activity?.length
-                  ? entry.details?.map((line, detailIndex) => {
-                      const isToolLine = line.includes("Tool");
-
-                      return (
-                        <text
-                          key={`${entry.id}-detail-${detailIndex}`}
-                          fg={isToolLine ? uiColors.tool : uiColors.muted}
-                          attributes={TextAttributes.NONE}
-                        >
-                          {formatBlock(line, isToolLine ? "+" : "|")}
-                        </text>
-                      );
-                    })
-                  : null}
+                {parts.map((part, index) =>
+                  renderTracePart(part, `${entry.id}-part-${index}`),
+                )}
               </box>
             ) : null}
           </box>

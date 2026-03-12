@@ -119,20 +119,26 @@ export function createDirectTools(): ToolSet {
     getWeather: tool({
       description:
         "Get current weather for a city or coordinates using Open-Meteo.",
-      inputSchema: z.union([
-        z.object({
-          city: z.string().min(1),
-        }),
-        z.object({
-          latitude: z.number(),
-          longitude: z.number(),
-        }),
-      ]),
+      inputSchema: z
+        .object({
+          city: z.string().min(1).optional(),
+          latitude: z.number().optional(),
+          longitude: z.number().optional(),
+        })
+        .refine(
+          (data) =>
+            (data.city != null && data.city !== "") ||
+            (data.latitude != null && data.longitude != null),
+          {
+            message:
+              "Provide either city or both latitude and longitude.",
+          },
+        ),
       execute: async (input) => {
         let latitude: number;
         let longitude: number;
 
-        if ("city" in input) {
+        if (input.city) {
           const coords = await geocodeCity(input.city);
           if (!coords) {
             return {
@@ -143,9 +149,18 @@ export function createDirectTools(): ToolSet {
 
           latitude = coords.latitude;
           longitude = coords.longitude;
-        } else {
+        } else if (
+          input.latitude != null &&
+          input.longitude != null
+        ) {
           latitude = input.latitude;
           longitude = input.longitude;
+        } else {
+          return {
+            success: false,
+            error:
+              "Provide either city or both latitude and longitude.",
+          };
         }
 
         const response = await fetch(
@@ -163,7 +178,7 @@ export function createDirectTools(): ToolSet {
 
         return {
           success: true,
-          ...("city" in input ? { city: input.city } : {}),
+          ...(input.city ? { city: input.city } : {}),
           latitude,
           longitude,
           weather: weatherData,
