@@ -4,7 +4,9 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "bun run --watch src/index.tsx"
+    "dev": "bun run --watch src/index.tsx",
+    "start": "bun run src/index.tsx",
+    "typecheck": "bunx tsc --noEmit"
   },
   "devDependencies": {
     "@types/bun": "latest"
@@ -13,8 +15,13 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@ai-sdk/mcp": "^0.0.3",
+    "@openrouter/ai-sdk-provider": "^2.1.1",
     "@opentui/core": "^0.1.87",
     "@opentui/react": "^0.1.87",
-    "react": "^19.2.4"
+    "ai": "^6.0.0",
+    "dotenv": "^16.4.5",
+    "react": "^19.2.4",
+    "zod": "^3.25.76"
   }
 }

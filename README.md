@@ -1,15 +1,20 @@
-# react
+# Subagents CLI Playground
 
-To install dependencies:
+Small OpenTUI demo for testing AI SDK subagents with OpenRouter and a Google Workspace MCP connection.
 
-```bash
-bun install
-```
+It reuses Junebot's environment values by loading `../junebot/.env.local`, stores OAuth tokens in [`db.txt`](/mnt/c/Users/ayver/Documents/VS%20CODE%20Data/june_all/subagents/db.txt), and keeps a token history instead of only the latest token.
 
-To run:
+Run it with:
 
 ```bash
-bun dev
+bun run src/index.tsx
 ```
 
-This project was created using `bun create tui`. [create-tui](https://git.new/create-tui) is the easiest way to get started with OpenTUI.
+Useful commands inside the app:
+
+```text
+/auth
+/tools
+/reset-auth
+/quit
+```
