@@ -9,6 +9,7 @@ import { execFileSync } from "node:child_process";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { buildMainAgent } from "./lib/agents";
 import { deleteConnectorRecord, getDbPath } from "./lib/db";
+import { createDirectTools } from "./lib/direct-tools";
 import { createGoogleMcpSession, listGoogleMcpTools } from "./lib/mcp";
 import {
   authenticateGoogleWorkspace,
@@ -94,13 +95,14 @@ function copyWithSystemClipboard(text: string): boolean {
 function App() {
   const tuiRenderer = useRenderer();
   const { width } = useTerminalDimensions();
+  const directTools = useMemo(() => createDirectTools(), []);
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([
     {
       id: makeId(),
       role: "assistant",
       title: "SYSTEM",
       content:
-        "Commands: /auth, /tools, /reset-auth, /quit. ctrl+C cancels a running turn or shows a hint.",
+        "Commands: /auth, /tools, /reset-auth, /quit. Direct tools are available even without Google auth. ctrl+C cancels a running turn or shows a hint.",
       createdAt: new Date().toISOString(),
     },
   ]);
@@ -327,9 +329,10 @@ function App() {
         const outputId = appendTranscript({
           role: "assistant",
           title: "AGENT",
-          content: "Loading Google MCP tools...",
+          content: "Loading direct tools and Google MCP tools...",
           details: [],
         });
+        const directToolNames = Object.keys(directTools).sort();
         const record = await getGoogleConnectorRecord((line) =>
           appendDetail(outputId, line),
         );
@@ -337,7 +340,13 @@ function App() {
         if (!record) {
           updateTranscript(outputId, (entry) => ({
             ...entry,
-            content: "No Google token yet. Run /auth first.",
+            content: [
+              "Direct tools:",
+              ...directToolNames.map((toolName) => `- ${toolName}`),
+              "",
+              "Google MCP tools:",
+              "- Not connected. Run /auth first.",
+            ].join("\n"),
           }));
           return;
         }
@@ -345,16 +354,19 @@ function App() {
         const tools = await listGoogleMcpTools(record);
         updateTranscript(outputId, (entry) => ({
           ...entry,
-          content:
-            tools.length === 0
-              ? "The Google MCP returned no tools."
-              : tools
-                  .map((toolInfo) =>
-                    toolInfo.description
-                      ? `- ${toolInfo.name}: ${toolInfo.description}`
-                      : `- ${toolInfo.name}`,
-                  )
-                  .join("\n"),
+          content: [
+            "Direct tools:",
+            ...directToolNames.map((toolName) => `- ${toolName}`),
+            "",
+            "Google MCP tools:",
+            ...(tools.length === 0
+              ? ["- The Google MCP returned no tools."]
+              : tools.map((toolInfo) =>
+                  toolInfo.description
+                    ? `- ${toolInfo.name}: ${toolInfo.description}`
+                    : `- ${toolInfo.name}`,
+                )),
+          ].join("\n"),
         }));
         setAuthSummary(`Google connected • token DB ${getDbPath()}`);
         return;
@@ -392,6 +404,7 @@ function App() {
 
       try {
         const mainAgent = buildMainAgent({
+          directTools,
           googleTools: mcpSession?.tools ?? {},
           emitStatus: (line) => appendDetail(outputId, line),
         });

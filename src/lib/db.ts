@@ -47,14 +47,30 @@ export type ConnectorRecord = {
   updatedAt: string;
 };
 
+export type LocalTaskStatus = "todo" | "in_progress" | "done" | "backlog";
+export type LocalTaskPriority = "low" | "medium" | "high" | "urgent";
+
+export type LocalTaskRecord = {
+  id: string;
+  title: string;
+  description: string | null;
+  status: LocalTaskStatus;
+  priority: LocalTaskPriority;
+  dueDate: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type DbShape = {
   connectors: Record<string, ConnectorRecord>;
+  tasks: LocalTaskRecord[];
 };
 
 const DB_PATH = resolve(env.subagentsRoot, "db.txt");
 
 const DEFAULT_DB: DbShape = {
   connectors: {},
+  tasks: [],
 };
 
 export async function readDb(): Promise<DbShape> {
@@ -63,6 +79,7 @@ export async function readDb(): Promise<DbShape> {
     const parsed = JSON.parse(raw) as Partial<DbShape>;
     return {
       connectors: parsed.connectors ?? {},
+      tasks: parsed.tasks ?? [],
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -120,6 +137,74 @@ export async function deleteConnectorRecord(connectorId: string): Promise<void> 
   const db = await readDb();
   delete db.connectors[connectorId];
   await writeDb(db);
+}
+
+export async function listTasks(): Promise<LocalTaskRecord[]> {
+  const db = await readDb();
+  return [...db.tasks].sort((left, right) => {
+    if (left.status !== right.status) {
+      return left.status.localeCompare(right.status);
+    }
+
+    return left.createdAt.localeCompare(right.createdAt);
+  });
+}
+
+export async function createTask(
+  input: Omit<LocalTaskRecord, "id" | "createdAt" | "updatedAt">,
+): Promise<LocalTaskRecord> {
+  const db = await readDb();
+  const now = new Date().toISOString();
+  const task: LocalTaskRecord = {
+    id: crypto.randomUUID(),
+    createdAt: now,
+    updatedAt: now,
+    ...input,
+  };
+
+  db.tasks.push(task);
+  await writeDb(db);
+  return task;
+}
+
+export async function updateTask(
+  taskId: string,
+  updates: Partial<
+    Pick<LocalTaskRecord, "title" | "description" | "status" | "priority" | "dueDate">
+  >,
+): Promise<LocalTaskRecord | null> {
+  const db = await readDb();
+  const index = db.tasks.findIndex((task) => task.id === taskId);
+  if (index === -1) {
+    return null;
+  }
+
+  const current = db.tasks[index];
+  if (!current) {
+    return null;
+  }
+
+  const nextTask: LocalTaskRecord = {
+    ...current,
+    ...updates,
+    updatedAt: new Date().toISOString(),
+  };
+
+  db.tasks[index] = nextTask;
+  await writeDb(db);
+  return nextTask;
+}
+
+export async function deleteTask(taskId: string): Promise<boolean> {
+  const db = await readDb();
+  const nextTasks = db.tasks.filter((task) => task.id !== taskId);
+  if (nextTasks.length === db.tasks.length) {
+    return false;
+  }
+
+  db.tasks = nextTasks;
+  await writeDb(db);
+  return true;
 }
 
 export function getDbPath(): string {
