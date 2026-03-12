@@ -356,16 +356,20 @@ function buildAuthorizationUrl(metadata: OAuthMetadata, redirectUri: string) {
   };
 }
 
-async function waitForAuthorizationCode(
+function startAuthorizationCallbackListener(
   redirectUri: string,
   expectedState: string,
   log: (message: string) => void,
   signal?: AbortSignal
 ): Promise<string> {
   const callbackUrl = new URL(redirectUri);
+  const bindHostname =
+    callbackUrl.hostname === "127.0.0.1" || callbackUrl.hostname === "localhost"
+      ? "0.0.0.0"
+      : callbackUrl.hostname;
   const timeoutMs = 5 * 60 * 1000;
 
-  return await new Promise<string>((resolve, reject) => {
+  return new Promise<string>((resolve, reject) => {
     let settled = false;
 
     const cleanup = () => {
@@ -400,7 +404,7 @@ async function waitForAuthorizationCode(
     }, timeoutMs);
 
     const server = Bun.serve({
-      hostname: callbackUrl.hostname,
+      hostname: bindHostname,
       port: Number(callbackUrl.port || 80),
       fetch(request) {
         const url = new URL(request.url);
@@ -437,7 +441,9 @@ async function waitForAuthorizationCode(
     });
 
     signal?.addEventListener("abort", onAbort, { once: true });
-    log(`Waiting for OAuth callback on ${redirectUri}`);
+    log(
+      `Waiting for OAuth callback on ${redirectUri} (listener bound to ${bindHostname}:${callbackUrl.port || "80"})`
+    );
   });
 }
 
@@ -560,17 +566,18 @@ export async function authenticateGoogleWorkspace(
     log
   );
   const authRequest = buildAuthorizationUrl(metadata, env.oauthRedirectUri);
-
-  options?.onAuthorizationUrl?.(authRequest.url);
-  log("Authorization URL prepared.");
-
-  await delay(50);
-  const code = await waitForAuthorizationCode(
+  const callbackPromise = startAuthorizationCallbackListener(
     env.oauthRedirectUri,
     authRequest.state,
     log,
     options?.signal
   );
+
+  options?.onAuthorizationUrl?.(authRequest.url);
+  log("Authorization URL prepared.");
+
+  await delay(10);
+  const code = await callbackPromise;
   const tokens = await exchangeCodeForTokens(
     code,
     authRequest.verifier,

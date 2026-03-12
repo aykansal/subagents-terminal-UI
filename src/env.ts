@@ -38,7 +38,7 @@ export const env = {
     "https://google-workspace-mcp-production-139b.up.railway.app/mcp",
   oauthRedirectUri:
     process.env.SUBAGENTS_OAUTH_REDIRECT_URI ||
-    "http://127.0.0.1:4591/oauth/callback",
+    "http://localhost:4591/oauth/callback",
 };
 
 export const models = {

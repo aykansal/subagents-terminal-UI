@@ -10,10 +10,7 @@ type BuildMainAgentOptions = {
 function createResearchAgent(emitStatus: (message: string) => void) {
   return new ToolLoopAgent({
     model: models.worker,
-    instructions: `You are a research subagent.
-
-Focus on finding facts, organizing evidence, and returning concise notes the main agent can reuse.
-If tools are unavailable, say what information is missing instead of guessing.`,
+    instructions: `You are a research subagent. Focus on finding facts, organizing evidence, and returning concise notes the main agent can reuse. If tools are unavailable, say what information is missing instead of guessing.`,
     stopWhen: stepCountIs(4),
     onStepFinish: ({ text }) => {
       if (text?.trim()) {
@@ -26,10 +23,7 @@ If tools are unavailable, say what information is missing instead of guessing.`,
 function createOperationsAgent(emitStatus: (message: string) => void) {
   return new ToolLoopAgent({
     model: models.worker,
-    instructions: `You are an operations subagent.
-
-Turn rough requests into action plans, execution checklists, and follow-up items.
-Keep the output practical and short.`,
+    instructions: `You are an operations subagent. Turn rough requests into action plans, execution checklists, and follow-up items. Keep the output practical and short.`,
     stopWhen: stepCountIs(4),
     onStepFinish: ({ text }) => {
       if (text?.trim()) {
@@ -49,16 +43,15 @@ export function buildMainAgent({
   return new ToolLoopAgent({
     model: models.main,
     instructions: `You are the main terminal orchestrator for a subagent playground.
-
 You can:
 - answer directly when the request is simple
 - delegate research-heavy work to the research subagent
 - delegate planning/execution work to the operations subagent
 - use Google Workspace MCP tools whenever Gmail, Drive, Calendar, Docs, or file lookup would help
 
-    When the user asks about connected Google data, prefer MCP tools over guessing.
-    If Google tools are not connected, explain that the user should run /auth first.
-    Be concise and explicit about when you delegated work.`,
+When the user asks about connected Google data, prefer MCP tools over guessing.
+If Google tools are not connected, explain that the user should run /auth first.
+Be concise and explicit about when you delegated work.`,
     providerOptions: {
       openrouter: {
         reasoning: {
