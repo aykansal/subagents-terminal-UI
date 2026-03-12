@@ -1,8 +1,4 @@
-import {
-  createCliRenderer,
-  type InputRenderable,
-  TextAttributes,
-} from "@opentui/core";
+import { createCliRenderer, type InputRenderable } from "@opentui/core";
 import {
   createRoot,
   useKeyboard,
@@ -18,21 +14,11 @@ import {
   authenticateGoogleWorkspace,
   getGoogleConnectorRecord,
 } from "./lib/oauth";
-
-type TranscriptEntry = {
-  id: string;
-  role: "user" | "assistant";
-  title: string;
-  content: string;
-  reasoning?: string;
-  tools?: string[];
-  usage?: string;
-  details?: string[];
-  actionLabel?: string;
-  actionValue?: string;
-  actionStatus?: string;
-  createdAt: string;
-};
+import { AppHeader } from "./ui/AppHeader";
+import { Composer } from "./ui/Composer";
+import { type TranscriptEntry } from "./ui/chat-types";
+import { StatusBar } from "./ui/StatusBar";
+import { TranscriptView } from "./ui/TranscriptView";
 
 function makeId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -80,19 +66,6 @@ function formatUsage(part: {
   return `finish=${part.finishReason} in=${inputTokens} out=${outputTokens} reasoning=${reasoningTokens}`;
 }
 
-function formatBlock(
-  content: string,
-  prefix: string,
-  continuationPrefix = "  "
-) {
-  return content
-    .split("\n")
-    .map((line, index) =>
-      index === 0 ? `${prefix} ${line}` : `${continuationPrefix}${line}`
-    )
-    .join("\n");
-}
-
 function copyWithSystemClipboard(text: string): boolean {
   const attempts: Array<[string, string[]]> = [];
 
@@ -102,7 +75,7 @@ function copyWithSystemClipboard(text: string): boolean {
     attempts.push(
       ["/mnt/c/Windows/System32/clip.exe", []],
       ["clip.exe", []],
-      ["cmd.exe", ["/c", "clip"]]
+      ["cmd.exe", ["/c", "clip"]],
     );
   }
 
@@ -134,17 +107,19 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [composerKey, setComposerKey] = useState(0);
   const [draft, setDraft] = useState("");
-  const [authSummary, setAuthSummary] = useState("Checking saved Google token...");
-  const [lastUsage, setLastUsage] = useState("usage=idle");
-  const [expandedEntries, setExpandedEntries] = useState<Record<string, boolean>>(
-    {}
+  const [authSummary, setAuthSummary] = useState(
+    "Checking saved Google token...",
   );
+  const [lastUsage, setLastUsage] = useState("usage=idle");
+  const [expandedEntries, setExpandedEntries] = useState<
+    Record<string, boolean>
+  >({});
   const abortControllerRef = useRef<AbortController | null>(null);
   const oauthAbortControllerRef = useRef<AbortController | null>(null);
   const composerInputRef = useRef<InputRenderable | null>(null);
 
   const appendTranscript = (
-    entry: Omit<TranscriptEntry, "id" | "createdAt">
+    entry: Omit<TranscriptEntry, "id" | "createdAt">,
   ): string => {
     const id = makeId();
     setTranscript((current) => [
@@ -160,10 +135,10 @@ function App() {
 
   const updateTranscript = (
     id: string,
-    updater: (entry: TranscriptEntry) => TranscriptEntry
+    updater: (entry: TranscriptEntry) => TranscriptEntry,
   ) => {
     setTranscript((current) =>
-      current.map((entry) => (entry.id === id ? updater(entry) : entry))
+      current.map((entry) => (entry.id === id ? updater(entry) : entry)),
     );
   };
 
@@ -175,8 +150,8 @@ function App() {
               ...entry,
               actionStatus,
             }
-          : entry
-      )
+          : entry,
+      ),
     );
   };
 
@@ -188,7 +163,7 @@ function App() {
       id,
       copied
         ? "Copied. Paste in your browser and sign in with the Google account you want to connect."
-        : "Copy failed in this terminal too. I can add an open-browser fallback next if you want."
+        : "Copy failed in this terminal too. I can add an open-browser fallback next if you want.",
     );
   };
 
@@ -200,8 +175,8 @@ function App() {
               ...entry,
               details: [...(entry.details ?? []), line].slice(-24),
             }
-          : entry
-      )
+          : entry,
+      ),
     );
   };
 
@@ -227,7 +202,7 @@ function App() {
         setAuthSummary(
           record
             ? `Google connected • token DB ${getDbPath()}`
-            : `Google disconnected • tokens will be written to ${getDbPath()}`
+            : `Google disconnected • tokens will be written to ${getDbPath()}`,
         );
       }
     })();
@@ -263,7 +238,7 @@ function App() {
       if (lastAssistant) {
         setExpanded(
           lastAssistant.id,
-          !Boolean(expandedEntries[lastAssistant.id])
+          !Boolean(expandedEntries[lastAssistant.id]),
         );
       }
     }
@@ -279,10 +254,7 @@ function App() {
   });
 
   const visibleTranscript = useMemo(() => transcript.slice(-16), [transcript]);
-  const divider = useMemo(
-    () => "─".repeat(Math.max(16, width - 4)),
-    [width]
-  );
+  const divider = useMemo(() => "─".repeat(Math.max(16, width - 4)), [width]);
 
   const runPrompt = async (input: string) => {
     const trimmed = input.trim();
@@ -314,7 +286,10 @@ function App() {
           actionLabel: "copy this",
         });
         setExpanded(outputId, true);
-        appendDetail(outputId, "Starting terminal OAuth for Google Workspace...");
+        appendDetail(
+          outputId,
+          "Starting terminal OAuth for Google Workspace...",
+        );
         const oauthAbortController = new AbortController();
         oauthAbortControllerRef.current = oauthAbortController;
         try {
@@ -326,15 +301,14 @@ function App() {
                 updateTranscript(outputId, (entry) => ({
                   ...entry,
                   actionValue: url,
-                  actionStatus:
-                    "Preparing clipboard copy...",
+                  actionStatus: "Preparing clipboard copy...",
                 }));
                 copyAuthValue(outputId, url);
               },
-            }
+            },
           );
           setAuthSummary(
-            `Google connected • token DB ${getDbPath()} • updated ${record.updatedAt}`
+            `Google connected • token DB ${getDbPath()} • updated ${record.updatedAt}`,
           );
           updateTranscript(outputId, (entry) => ({
             ...entry,
@@ -357,7 +331,7 @@ function App() {
           details: [],
         });
         const record = await getGoogleConnectorRecord((line) =>
-          appendDetail(outputId, line)
+          appendDetail(outputId, line),
         );
 
         if (!record) {
@@ -378,7 +352,7 @@ function App() {
                   .map((toolInfo) =>
                     toolInfo.description
                       ? `- ${toolInfo.name}: ${toolInfo.description}`
-                      : `- ${toolInfo.name}`
+                      : `- ${toolInfo.name}`,
                   )
                   .join("\n"),
         }));
@@ -389,7 +363,7 @@ function App() {
       if (trimmed === "/reset-auth") {
         await deleteConnectorRecord("google-workspace");
         setAuthSummary(
-          `Google disconnected • tokens will be written to ${getDbPath()}`
+          `Google disconnected • tokens will be written to ${getDbPath()}`,
         );
         appendTranscript({
           role: "assistant",
@@ -410,7 +384,7 @@ function App() {
       setExpanded(outputId, true);
 
       const record = await getGoogleConnectorRecord((line) =>
-        appendDetail(outputId, line)
+        appendDetail(outputId, line),
       );
       const mcpSession = record ? await createGoogleMcpSession(record) : null;
       const abortController = new AbortController();
@@ -440,7 +414,7 @@ function App() {
               updateTranscript(outputId, (entry) => ({
                 ...entry,
                 reasoning: trimBlock(
-                  (entry.reasoning ?? "") + readStreamText(part)
+                  (entry.reasoning ?? "") + readStreamText(part),
                 ),
               }));
               break;
@@ -463,7 +437,7 @@ function App() {
                   part.error instanceof Error
                     ? part.error.message
                     : String(part.error)
-                }`
+                }`,
               );
               break;
             case "finish": {
@@ -483,7 +457,7 @@ function App() {
         setAuthSummary(
           record
             ? `Google connected • token DB ${getDbPath()}`
-            : `Google disconnected • run /auth to enable MCP tools`
+            : `Google disconnected • run /auth to enable MCP tools`,
         );
       } finally {
         abortControllerRef.current = null;
@@ -521,189 +495,25 @@ function App() {
         paddingRight: 1,
       }}
     >
-      <box
-        style={{
-          height: 3,
-          flexDirection: "column",
-          justifyContent: "center",
-          paddingTop: 1,
+      <AppHeader authSummary={authSummary} divider={divider} />
+      <TranscriptView
+        busy={busy}
+        divider={divider}
+        entries={visibleTranscript}
+        expandedEntries={expandedEntries}
+      />
+      <Composer
+        busy={busy}
+        composerKey={composerKey}
+        divider={divider}
+        draft={draft}
+        inputRef={composerInputRef}
+        onChange={setDraft}
+        onSubmit={(value) => {
+          void runPrompt(value);
         }}
-      >
-        <text fg="#f5f5f5">
-          <strong>subagents</strong>
-        </text>
-        <text fg="#a1a1aa" attributes={TextAttributes.DIM}>
-          {authSummary}
-        </text>
-        <text fg="#3f3f46" attributes={TextAttributes.DIM}>
-          {divider}
-        </text>
-      </box>
-
-      <box
-        style={{
-          flexGrow: 1,
-          flexDirection: "column",
-          paddingTop: 1,
-          paddingBottom: 1,
-        }}
-      >
-        <scrollbox style={{ flexGrow: 1, paddingTop: 1, paddingBottom: 1 }}>
-          {visibleTranscript.map((entry, index) => {
-            const isExpanded = Boolean(expandedEntries[entry.id]);
-            const hasDetails =
-              Boolean(entry.reasoning) ||
-              Boolean(entry.tools?.length) ||
-              Boolean(entry.usage) ||
-              Boolean(entry.details?.length);
-            const isUser = entry.role === "user";
-            const marker = isUser ? ">" : "*";
-            const accent = isUser ? "#f4f4f5" : "#e5e7eb";
-            const summaryLine =
-              entry.content || (!isUser && busy ? "Streaming..." : "");
-            const label = entry.title === "SYSTEM" ? "[system] " : "";
-
-            return (
-              <box
-                key={entry.id}
-                style={{
-                  flexDirection: "column",
-                  marginBottom: index === visibleTranscript.length - 1 ? 0 : 1,
-                  paddingTop: index === 0 ? 0 : 1,
-                }}
-              >
-                {index > 0 ? (
-                  <text fg="#3f3f46" attributes={TextAttributes.DIM}>
-                    {divider}
-                  </text>
-                ) : null}
-
-                <box
-                  style={{
-                    flexDirection: "column",
-                    marginTop: index === 0 ? 0 : 1,
-                  }}
-                >
-                  <text fg={accent}>
-                    {formatBlock(`${label}${summaryLine || "..."}`, marker)}
-                  </text>
-
-                  {hasDetails ? (
-                    <box style={{ flexDirection: "column", marginTop: 1 }}>
-                      <text fg="#71717a" attributes={TextAttributes.DIM}>
-                        {entry.usage
-                          ? `${isExpanded ? "[-]" : "[+]"} ${entry.usage}`
-                          : `${isExpanded ? "[-]" : "[+]"} details`}
-                      </text>
-
-                      {isExpanded ? (
-                        <box
-                          style={{
-                            flexDirection: "column",
-                            marginTop: 1,
-                            paddingLeft: 2,
-                          }}
-                        >
-                          {entry.reasoning ? (
-                            <text fg="#a78bfa" attributes={TextAttributes.DIM}>
-                              {formatBlock(entry.reasoning, "~")}
-                            </text>
-                          ) : null}
-
-                          {entry.tools && entry.tools.length > 0 ? (
-                            <text fg="#34d399">
-                              {formatBlock(
-                                `tools ${entry.tools.join(", ")}`,
-                                "+"
-                              )}
-                            </text>
-                          ) : null}
-
-                          {entry.actionLabel ? (
-                            <box style={{ flexDirection: "column", marginTop: 1 }}>
-                              <text fg="#60a5fa">
-                                {formatBlock(`[ ${entry.actionLabel} ]`, "+")}
-                              </text>
-                              <text fg="#a1a1aa" attributes={TextAttributes.DIM}>
-                                {formatBlock(
-                                  entry.actionStatus ??
-                                    "Press Ctrl+Y to copy this, then paste it into your browser with the Google account you want to connect.",
-                                  "|"
-                                )}
-                              </text>
-                            </box>
-                          ) : null}
-
-                          {entry.details?.map((line, detailIndex) => (
-                            <text
-                              key={`${entry.id}-detail-${detailIndex}`}
-                              fg={line.includes("Tool") ? "#34d399" : "#a1a1aa"}
-                              attributes={
-                                line.includes("Tool")
-                                  ? TextAttributes.NONE
-                                  : TextAttributes.DIM
-                              }
-                            >
-                              {formatBlock(
-                                line,
-                                line.includes("Tool") ? "+" : "|"
-                              )}
-                            </text>
-                          ))}
-                        </box>
-                      ) : null}
-                    </box>
-                  ) : null}
-                </box>
-              </box>
-            );
-          })}
-        </scrollbox>
-      </box>
-
-      <box
-        style={{
-          height: 4,
-          flexDirection: "column",
-          justifyContent: "center",
-          paddingTop: 1,
-        }}
-      >
-        <text fg="#3f3f46" attributes={TextAttributes.DIM}>
-          {divider}
-        </text>
-        <box style={{ flexDirection: "row", alignItems: "center" }}>
-          <text fg="#f5f5f5">{">"}</text>
-          <box style={{ flexGrow: 1, paddingLeft: 1 }}>
-            <input
-              ref={composerInputRef}
-              key={composerKey}
-              placeholder={busy ? "Agent is running..." : "Enter prompt here"}
-              placeholderColor="#71717a"
-              value={draft}
-              focused={!busy}
-              onChange={setDraft}
-              onSubmit={(value) => {
-                if (typeof value === "string") {
-                  void runPrompt(value);
-                }
-              }}
-            />
-          </box>
-        </box>
-      </box>
-
-      <box
-        style={{
-          height: 4,
-          flexDirection: "column",
-          justifyContent: "center",
-        }}
-      >
-        <text fg="#71717a" attributes={TextAttributes.DIM}>
-          Mode:{busy ? "running" : "idle"} • Enter:Send • Ctrl+C:Abort • /auth • /tools • /reset-auth • /quit 
-        </text>
-      </box>
+      />
+      <StatusBar busy={busy} />
     </box>
   );
 }

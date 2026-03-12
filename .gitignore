@@ -26,6 +26,8 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 .eslintcache
 .cache
 *.tsbuildinfo
+db.txt
+ui-design.md
 
 # IntelliJ based IDEs
 .idea
