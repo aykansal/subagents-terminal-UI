@@ -41,6 +41,43 @@ type BuildMainAgentOptions = {
   emitStatus: (event: AgentStatusEvent) => void;
 };
 
+function createAgentCallbacks(
+  agentName: string,
+  emitStatus: (event: AgentStatusEvent) => void,
+) {
+  return {
+    experimental_onToolCallStart: ({ toolCall }: { toolCall: { toolName: string; toolCallId: string; input: unknown } }) => {
+      emitStatus({
+        type: "tool-start",
+        agent: agentName,
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        input: toolCall.input,
+      });
+    },
+    experimental_onToolCallFinish: ({ toolCall, success, output, error }: { toolCall: { toolName: string; toolCallId: string }; success: boolean; output?: unknown; error?: unknown }) => {
+      emitStatus({
+        type: "tool-finish",
+        agent: agentName,
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        success,
+        output,
+        error,
+      });
+    },
+    onStepFinish: ({ text }: { text?: string }) => {
+      if (text?.trim()) {
+        emitStatus({
+          type: "step-finish",
+          agent: agentName,
+          text: text.trim(),
+        });
+      }
+    },
+  };
+}
+
 function createResearchAgent(
   directTools: ToolSet,
   emitStatus: (event: AgentStatusEvent) => void,
@@ -52,35 +89,7 @@ Use the direct tools when time, weather, or local task context would help.
 If a required tool is unavailable, say what information is missing instead of guessing.`,
     stopWhen: stepCountIs(4),
     tools: directTools,
-    experimental_onToolCallStart: ({ toolCall }) => {
-      emitStatus({
-        type: "tool-start",
-        agent: "research",
-        toolName: toolCall.toolName,
-        toolCallId: toolCall.toolCallId,
-        input: toolCall.input,
-      });
-    },
-    experimental_onToolCallFinish: ({ toolCall, success, output, error }) => {
-      emitStatus({
-        type: "tool-finish",
-        agent: "research",
-        toolName: toolCall.toolName,
-        toolCallId: toolCall.toolCallId,
-        success,
-        output,
-        error,
-      });
-    },
-    onStepFinish: ({ text }) => {
-      if (text?.trim()) {
-        emitStatus({
-          type: "step-finish",
-          agent: "research",
-          text: text.trim(),
-        });
-      }
-    },
+    ...createAgentCallbacks("research", emitStatus),
   });
 }
 
@@ -95,35 +104,7 @@ Use the local task tools whenever a plan should become tracked work.
 Keep the output practical and short.`,
     stopWhen: stepCountIs(4),
     tools: directTools,
-    experimental_onToolCallStart: ({ toolCall }) => {
-      emitStatus({
-        type: "tool-start",
-        agent: "operations",
-        toolName: toolCall.toolName,
-        toolCallId: toolCall.toolCallId,
-        input: toolCall.input,
-      });
-    },
-    experimental_onToolCallFinish: ({ toolCall, success, output, error }) => {
-      emitStatus({
-        type: "tool-finish",
-        agent: "operations",
-        toolName: toolCall.toolName,
-        toolCallId: toolCall.toolCallId,
-        success,
-        output,
-        error,
-      });
-    },
-    onStepFinish: ({ text }) => {
-      if (text?.trim()) {
-        emitStatus({
-          type: "step-finish",
-          agent: "operations",
-          text: text.trim(),
-        });
-      }
-    },
+    ...createAgentCallbacks("operations", emitStatus),
   });
 }
 
@@ -138,35 +119,7 @@ Prefer using task tools instead of only describing what should happen.
 When the request is ambiguous, inspect the current tasks first and act conservatively.`,
     stopWhen: stepCountIs(5),
     tools: directTools,
-    experimental_onToolCallStart: ({ toolCall }) => {
-      emitStatus({
-        type: "tool-start",
-        agent: "task manager",
-        toolName: toolCall.toolName,
-        toolCallId: toolCall.toolCallId,
-        input: toolCall.input,
-      });
-    },
-    experimental_onToolCallFinish: ({ toolCall, success, output, error }) => {
-      emitStatus({
-        type: "tool-finish",
-        agent: "task manager",
-        toolName: toolCall.toolName,
-        toolCallId: toolCall.toolCallId,
-        success,
-        output,
-        error,
-      });
-    },
-    onStepFinish: ({ text }) => {
-      if (text?.trim()) {
-        emitStatus({
-          type: "step-finish",
-          agent: "task manager",
-          text: text.trim(),
-        });
-      }
-    },
+    ...createAgentCallbacks("task manager", emitStatus),
   });
 }
 
@@ -180,35 +133,7 @@ function createDailyBriefAgent(
 Use tools directly when they can improve the brief. Keep the output crisp and action-oriented.`,
     stopWhen: stepCountIs(5),
     tools: directTools,
-    experimental_onToolCallStart: ({ toolCall }) => {
-      emitStatus({
-        type: "tool-start",
-        agent: "daily brief",
-        toolName: toolCall.toolName,
-        toolCallId: toolCall.toolCallId,
-        input: toolCall.input,
-      });
-    },
-    experimental_onToolCallFinish: ({ toolCall, success, output, error }) => {
-      emitStatus({
-        type: "tool-finish",
-        agent: "daily brief",
-        toolName: toolCall.toolName,
-        toolCallId: toolCall.toolCallId,
-        success,
-        output,
-        error,
-      });
-    },
-    onStepFinish: ({ text }) => {
-      if (text?.trim()) {
-        emitStatus({
-          type: "step-finish",
-          agent: "daily brief",
-          text: text.trim(),
-        });
-      }
-    },
+    ...createAgentCallbacks("daily brief", emitStatus),
   });
 }
 
