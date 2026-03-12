@@ -1,4 +1,8 @@
-import { createCliRenderer, TextAttributes } from "@opentui/core";
+import {
+  createCliRenderer,
+  type InputRenderable,
+  TextAttributes,
+} from "@opentui/core";
 import {
   createRoot,
   useKeyboard,
@@ -137,6 +141,7 @@ function App() {
   );
   const abortControllerRef = useRef<AbortController | null>(null);
   const oauthAbortControllerRef = useRef<AbortController | null>(null);
+  const composerInputRef = useRef<InputRenderable | null>(null);
 
   const appendTranscript = (
     entry: Omit<TranscriptEntry, "id" | "createdAt">
@@ -207,6 +212,12 @@ function App() {
     }));
   };
 
+  const focusComposer = () => {
+    if (!busy) {
+      composerInputRef.current?.focus();
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
 
@@ -225,6 +236,10 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    focusComposer();
+  }, [busy, composerKey]);
 
   useKeyboard((key) => {
     if (key.ctrl && key.name === "c") {
@@ -498,6 +513,7 @@ function App() {
 
   return (
     <box
+      onMouseDown={focusComposer}
       style={{
         flexGrow: 1,
         flexDirection: "column",
@@ -660,6 +676,7 @@ function App() {
           <text fg="#f5f5f5">{">"}</text>
           <box style={{ flexGrow: 1, paddingLeft: 1 }}>
             <input
+              ref={composerInputRef}
               key={composerKey}
               placeholder={busy ? "Agent is running..." : "Enter prompt here"}
               placeholderColor="#71717a"
@@ -684,7 +701,7 @@ function App() {
         }}
       >
         <text fg="#71717a" attributes={TextAttributes.DIM}>
-          Enter=send • Ctrl+Y=copy auth link • /auth • /tools • /reset-auth • Ctrl+C=cancel • /quit • {busy ? "mode=running" : "mode=idle"}
+          Mode:{busy ? "running" : "idle"} • Enter:Send • Ctrl+C:Abort • /auth • /tools • /reset-auth • /quit 
         </text>
       </box>
     </box>
