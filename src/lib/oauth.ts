@@ -5,8 +5,10 @@ import { getConnectorRecord, saveConnectorRecord } from "./db";
 import { env } from "../env";
 
 const CLIENT_ID = "mcp-chat-ui-client";
-const METADATA_FETCH_TIMEOUT_MS = 3500;
+const METADATA_FETCH_TIMEOUT_MS = 12_000;
 const MAX_METADATA_REDIRECTS = 3;
+const MAX_FETCH_RETRIES = 3;
+const MCP_PROTOCOL_VERSION = "2025-06-18";
 const CONNECTOR_ID = "google-workspace";
 
 function base64Url(buffer: Buffer): string {
@@ -81,18 +83,32 @@ async function fetchWithTimeout(
   url: string,
   init?: RequestInit
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), METADATA_FETCH_TIMEOUT_MS);
+  let lastError: unknown;
 
-  try {
-    return await fetch(url, {
-      ...init,
-      signal: controller.signal,
-      redirect: "manual",
-    });
-  } finally {
-    clearTimeout(timeout);
+  for (let attempt = 1; attempt <= MAX_FETCH_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      METADATA_FETCH_TIMEOUT_MS
+    );
+
+    try {
+      return await fetch(url, {
+        ...init,
+        signal: controller.signal,
+        redirect: "manual",
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt === MAX_FETCH_RETRIES) {
+        break;
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+
+  throw lastError;
 }
 
 async function fetchWithRedirectHandling(
@@ -130,12 +146,23 @@ async function discoverProtectedResourceMetadata(serverUrl: string) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      "mcp-protocol-version": MCP_PROTOCOL_VERSION,
     },
     body: JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
       method: "initialize",
-      params: {},
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {
+          tools: {},
+        },
+        clientInfo: {
+          name: "subagents-cli",
+          version: "0.1.0",
+        },
+      },
     }),
   });
 
@@ -481,9 +508,17 @@ export async function refreshAccessToken(
 export async function authenticateGoogleWorkspace(
   log: (message: string) => void
 ): Promise<ConnectorRecord> {
-  log("Discovering OAuth metadata from the Google Workspace MCP server...");
+  log(`Discovering OAuth metadata from ${env.googleWorkspaceMcpUrl} ...`);
 
-  const metadataResult = await getOAuthMetadata(env.googleWorkspaceMcpUrl);
+  const metadataResult = await getOAuthMetadata(env.googleWorkspaceMcpUrl).catch(
+    (error) => {
+      throw new Error(
+        `OAuth metadata discovery failed for ${env.googleWorkspaceMcpUrl}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  );
   if (!metadataResult) {
     throw new Error("Could not discover OAuth metadata for the Google MCP.");
   }

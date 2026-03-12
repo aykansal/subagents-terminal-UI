@@ -56,9 +56,16 @@ You can:
 - delegate planning/execution work to the operations subagent
 - use Google Workspace MCP tools whenever Gmail, Drive, Calendar, Docs, or file lookup would help
 
-When the user asks about connected Google data, prefer MCP tools over guessing.
-If Google tools are not connected, explain that the user should run /auth first.
-Be concise and explicit about when you delegated work.`,
+    When the user asks about connected Google data, prefer MCP tools over guessing.
+    If Google tools are not connected, explain that the user should run /auth first.
+    Be concise and explicit about when you delegated work.`,
+    providerOptions: {
+      openrouter: {
+        reasoning: {
+          effort: "medium",
+        },
+      },
+    },
     stopWhen: stepCountIs(8),
     tools: {
       delegateResearch: tool({

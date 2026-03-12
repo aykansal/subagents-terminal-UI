@@ -42,6 +42,6 @@ export const env = {
 };
 
 export const models = {
-  main: openrouter.languageModel("google/gemini-3.1-pro-preview"),
+  main: openrouter.languageModel("anthropic/claude-sonnet-4.6"),
   worker: openrouter.languageModel("openai/gpt-5-nano"),
 };
