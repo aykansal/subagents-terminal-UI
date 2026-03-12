@@ -11,7 +11,6 @@ import { buildMainAgent, type AgentStatusEvent } from "./lib/agents";
 import {
   deriveChatTitle,
   formatStructuredValue,
-  trimInline,
 } from "./lib/chat-utils";
 import {
   createChatSession,
@@ -41,14 +40,6 @@ import { TranscriptView } from "./ui/TranscriptView";
 
 function makeId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function trimBlock(value: string, maxChars = 2200) {
-  if (value.length <= maxChars) {
-    return value;
-  }
-
-  return `${value.slice(value.length - maxChars)}\n[truncated]`;
 }
 
 function readStreamText(part: unknown): string {
@@ -142,6 +133,57 @@ function isDelegateTool(toolName: string) {
   return toolName.startsWith("delegate");
 }
 
+function normalizeTranscriptEntry(entry: TranscriptEntry): TranscriptEntry {
+  if (!entry.activity?.length) {
+    return entry;
+  }
+
+  const textEvents = entry.activity.filter(
+    (event) =>
+      event.kind === "text" &&
+      (event.label === "assistant output" || event.label === "main output"),
+  );
+  const lastTextEventId = textEvents[textEvents.length - 1]?.id;
+  const reasoningEvents = entry.activity.filter((event) => event.kind === "reasoning");
+  const lastReasoningEventId = reasoningEvents[reasoningEvents.length - 1]?.id;
+  let changed = false;
+
+  const activity = entry.activity.map((event) => {
+    if (
+      event.id === lastTextEventId &&
+      entry.content &&
+      event.content?.includes("[truncated]")
+    ) {
+      changed = true;
+      return {
+        ...event,
+        content: entry.content,
+      };
+    }
+
+    if (
+      event.id === lastReasoningEventId &&
+      entry.reasoning &&
+      event.content?.includes("[truncated]")
+    ) {
+      changed = true;
+      return {
+        ...event,
+        content: entry.reasoning,
+      };
+    }
+
+    return event;
+  });
+
+  return changed
+    ? {
+        ...entry,
+        activity,
+      }
+    : entry;
+}
+
 function App() {
   const tuiRenderer = useRenderer();
   const { width } = useTerminalDimensions();
@@ -155,6 +197,9 @@ function App() {
   const [draft, setDraft] = useState("");
   const [googleConnected, setGoogleConnected] = useState(false);
   const [expandedEntries, setExpandedEntries] = useState<
+    Record<string, boolean>
+  >({});
+  const [collapsedActivityNodes, setCollapsedActivityNodes] = useState<
     Record<string, boolean>
   >({});
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -318,11 +363,10 @@ function App() {
     id: string,
     eventId: string,
     value: string,
-    trimTo = 2200,
   ) => {
     updateActivity(id, eventId, (event) => ({
       ...event,
-      content: trimBlock(`${event.content ?? ""}${value}`, trimTo),
+      content: `${event.content ?? ""}${value}`,
     }));
   };
 
@@ -351,8 +395,8 @@ function App() {
         const rootEventId = appendActivity(id, {
           parentId: activeDelegateId,
           kind: "status",
-          label: `spawn ${event.agent} subagent`,
-          content: trimInline(event.task, 240),
+          label: `${event.agent} subagent`,
+          content: event.task,
           tone: "action",
           state: "running",
         });
@@ -378,7 +422,7 @@ function App() {
             parentId: activeSubagent.rootEventId,
             kind: "result",
             label: `${event.agent} response`,
-            content: trimBlock(event.summary.trim(), 900),
+            content: event.summary.trim(),
             tone: "muted",
             state: "done",
           });
@@ -396,7 +440,7 @@ function App() {
         const stepEventId = appendActivity(id, {
           parentId,
           kind: "step",
-          label: `${event.agent} reasoning`,
+          label: `${event.agent} step`,
           tone: "muted",
           state: "done",
         });
@@ -404,8 +448,8 @@ function App() {
         appendActivity(id, {
           parentId: stepEventId,
           kind: "text",
-          label: "draft response",
-          content: trimBlock(event.text.trim(), 900),
+          label: `${event.agent} output`,
+          content: event.text.trim(),
           tone: "muted",
           state: "done",
         });
@@ -424,8 +468,8 @@ function App() {
         const toolEventId = appendActivity(id, {
           parentId,
           kind: "tool",
-          label: event.toolName,
-          content: formatStructuredValue(event.input),
+          label: `tool ${event.toolName}`,
+          content: formatStructuredValue(event.input, Number.POSITIVE_INFINITY),
           tone: "tool",
           state: "running",
         });
@@ -444,8 +488,8 @@ function App() {
         updateActivity(id, toolEventId, (item) => ({
           ...item,
           content: event.success
-            ? formatStructuredValue(event.output)
-            : formatStructuredValue(event.error),
+            ? formatStructuredValue(event.output, Number.POSITIVE_INFINITY)
+            : formatStructuredValue(event.error, Number.POSITIVE_INFINITY),
           state: event.success ? "done" : "error",
           tone: event.success ? "tool" : "error",
         }));
@@ -483,6 +527,13 @@ function App() {
     }));
   };
 
+  const toggleActivityNode = (id: string) => {
+    setCollapsedActivityNodes((current) => ({
+      ...current,
+      [id]: !current[id],
+    }));
+  };
+
   const focusComposer = () => {
     if (!uiBusy) {
       composerInputRef.current?.focus();
@@ -512,6 +563,7 @@ function App() {
     setTranscript([]);
     activityContextRef.current = {};
     setExpandedEntries({});
+    setCollapsedActivityNodes({});
     resetComposer();
     setChatSessions((current) =>
       sortChatSummaries([
@@ -540,9 +592,10 @@ function App() {
     await setActiveChatSession(chatId);
     activeChatIdRef.current = chatId;
     setActiveChatId(chatId);
-    setTranscript(chat.transcript);
+    setTranscript(chat.transcript.map(normalizeTranscriptEntry));
     activityContextRef.current = {};
     setExpandedEntries({});
+    setCollapsedActivityNodes({});
     resetComposer();
   };
 
@@ -575,8 +628,9 @@ function App() {
         setChatSessions(summaries);
         activeChatIdRef.current = initialActiveChat.id;
         setActiveChatId(initialActiveChat.id);
-        setTranscript(initialActiveChat.transcript);
+        setTranscript(initialActiveChat.transcript.map(normalizeTranscriptEntry));
         activityContextRef.current = {};
+        setCollapsedActivityNodes({});
       } else {
         const chatId = makeId();
         const chat = await createChatSession({
@@ -603,6 +657,7 @@ function App() {
         setActiveChatId(chat.id);
         setTranscript([]);
         activityContextRef.current = {};
+        setCollapsedActivityNodes({});
       }
 
       setBooting(false);
@@ -816,7 +871,7 @@ function App() {
               const stepEventId = appendActivity(outputId, {
                 parentId: activeSubagent?.rootEventId,
                 kind: "step",
-                label: "model step",
+                label: "main step",
                 tone: "muted",
                 state: "running",
               });
@@ -837,7 +892,7 @@ function App() {
                 context.textEventIdsByStreamId[part.id] = appendActivity(outputId, {
                   parentId: getActiveParentId(context),
                   kind: "text",
-                  label: "assistant output",
+                  label: "main output",
                   tone: "default",
                   state: "running",
                 });
@@ -851,9 +906,7 @@ function App() {
             case "reasoning-delta":
               updateTranscript(outputId, (entry) => ({
                 ...entry,
-                reasoning: trimBlock(
-                  (entry.reasoning ?? "") + readStreamText(part),
-                ),
+                reasoning: (entry.reasoning ?? "") + readStreamText(part),
               }));
               if (!context.reasoningEventIdsByStreamId[part.id]) {
                 context.reasoningEventIdsByStreamId[part.id] = appendActivity(outputId, {
@@ -889,12 +942,12 @@ function App() {
               break;
             case "tool-input-start": {
               const toolEventId = appendActivity(outputId, {
-                parentId: getActiveParentId(context),
-                kind: "tool",
-                label: part.toolName,
-                tone: "tool",
-                state: "running",
-              });
+                  parentId: getActiveParentId(context),
+                  kind: "tool",
+                  label: `tool ${part.toolName}`,
+                  tone: "tool",
+                  state: "running",
+                });
               context.toolEventIdsByCallId[part.id] = toolEventId;
               if (isDelegateTool(part.toolName)) {
                 context.activeDelegateEventIds.push(toolEventId);
@@ -922,8 +975,8 @@ function App() {
                 const toolEventId = appendActivity(outputId, {
                   parentId: getActiveParentId(context),
                   kind: "tool",
-                  label: part.toolName,
-                  content: formatStructuredValue(part.input),
+                  label: `tool ${part.toolName}`,
+                  content: formatStructuredValue(part.input, Number.POSITIVE_INFINITY),
                   tone: "tool",
                   state: "running",
                 });
@@ -934,7 +987,7 @@ function App() {
               } else {
                 updateActivity(outputId, context.toolEventIdsByCallId[part.toolCallId], (event) => ({
                   ...event,
-                  content: formatStructuredValue(part.input),
+                  content: formatStructuredValue(part.input, Number.POSITIVE_INFINITY),
                 }));
               }
               break;
@@ -942,7 +995,7 @@ function App() {
               if (context.toolEventIdsByCallId[part.toolCallId]) {
                 updateActivity(outputId, context.toolEventIdsByCallId[part.toolCallId], (event) => ({
                   ...event,
-                  content: formatStructuredValue(part.output),
+                  content: formatStructuredValue(part.output, Number.POSITIVE_INFINITY),
                   state: part.preliminary ? "running" : "done",
                 }));
               }
@@ -958,7 +1011,7 @@ function App() {
               if (context.toolEventIdsByCallId[part.toolCallId]) {
                 updateActivity(outputId, context.toolEventIdsByCallId[part.toolCallId], (event) => ({
                   ...event,
-                  content: formatStructuredValue(part.error),
+                  content: formatStructuredValue(part.error, Number.POSITIVE_INFINITY),
                   state: "error",
                   tone: "error",
                 }));
@@ -971,7 +1024,7 @@ function App() {
               if (stepId) {
                 updateActivity(outputId, stepId, (event) => ({
                   ...event,
-                  label: `model step ${part.finishReason}`,
+                  label: `main step ${part.finishReason}`,
                   state: "done",
                 }));
               }
@@ -1056,9 +1109,11 @@ function App() {
       />
       <TranscriptView
         busy={uiBusy}
+        collapsedActivityNodes={collapsedActivityNodes}
         divider={divider}
         entries={visibleTranscript}
         expandedEntries={expandedEntries}
+        onToggleActivityNode={toggleActivityNode}
         onToggleExpanded={toggleExpanded}
       />
       <Composer

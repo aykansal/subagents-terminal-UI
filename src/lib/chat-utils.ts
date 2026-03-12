@@ -49,13 +49,21 @@ export function trimInline(value: string, maxChars = 180) {
 
 export function formatStructuredValue(value: unknown, maxChars = 240) {
   if (typeof value === "string") {
-    return trimInline(value, maxChars);
+    return maxChars === Number.POSITIVE_INFINITY
+      ? value
+      : trimInline(value, maxChars);
   }
 
   try {
-    return trimInline(JSON.stringify(value), maxChars);
+    const formatted = JSON.stringify(value, null, 2);
+    return maxChars === Number.POSITIVE_INFINITY
+      ? formatted
+      : trimInline(formatted, maxChars);
   } catch {
-    return trimInline(String(value), maxChars);
+    const fallback = String(value);
+    return maxChars === Number.POSITIVE_INFINITY
+      ? fallback
+      : trimInline(fallback, maxChars);
   }
 }
 

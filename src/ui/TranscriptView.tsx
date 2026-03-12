@@ -12,25 +12,31 @@ import { uiColors, uiCopy, uiSpacing } from "../lib/design-system";
 
 type TranscriptViewProps = {
   busy: boolean;
+  collapsedActivityNodes: Record<string, boolean>;
   divider: string;
   entries: TranscriptEntry[];
   expandedEntries: Record<string, boolean>;
+  onToggleActivityNode: (id: string) => void;
   onToggleExpanded: (id: string) => void;
 };
 
 type TranscriptRowProps = {
   busy: boolean;
+  collapsedActivityNodes: Record<string, boolean>;
   divider: string;
   entry: TranscriptEntry;
   expanded: boolean;
   isFirst: boolean;
   isLast: boolean;
+  onToggleActivityNode: (id: string) => void;
   onToggleExpanded: (id: string) => void;
 };
 
 type ActivityNodeProps = {
+  collapsedActivityNodes: Record<string, boolean>;
   event: OrderedTranscriptActivityEvent;
   isLast: boolean;
+  onToggleActivityNode: (id: string) => void;
   trail: string;
 };
 
@@ -76,17 +82,27 @@ function getActivityColor(event: TranscriptActivityEvent) {
 function renderActivityLine(prefix: string, value: string) {
   return value
     .split("\n")
-    .map((line, index) => `${index === 0 ? prefix : " ".repeat(prefix.length)}${line}`)
+    .map((line, index) =>
+      `${index === 0 ? prefix : " ".repeat(prefix.length)}${line}`,
+    )
     .join("\n");
 }
 
-function ActivityNode({ event, isLast, trail }: ActivityNodeProps) {
+function ActivityNode({
+  collapsedActivityNodes,
+  event,
+  isLast,
+  onToggleActivityNode,
+  trail,
+}: ActivityNodeProps) {
   const branch = `${trail}${isLast ? "└─" : "├─"}`;
   const childTrail = `${trail}${isLast ? "  " : "│ "}`;
+  const isCollapsible = Boolean(event.content || event.children.length);
+  const collapsed = Boolean(collapsedActivityNodes[event.id]);
+  const toggleLabel = isCollapsible ? (collapsed ? "[+]" : "[-]") : "   ";
   const suffix =
     event.state === "running" ? "..." : event.state === "error" ? " (failed)" : "";
-  const label = `${getActivityIcon(event)} ${event.label}${suffix}`;
-  const children = event.children;
+  const label = `${toggleLabel} ${getActivityIcon(event)} ${event.label}${suffix}`;
 
   return (
     <box style={{ flexDirection: "column" }}>
@@ -97,11 +113,16 @@ function ActivityNode({ event, isLast, trail }: ActivityNodeProps) {
             ? TextAttributes.DIM
             : TextAttributes.NONE
         }
+        onMouseDown={() => {
+          if (isCollapsible) {
+            onToggleActivityNode(event.id);
+          }
+        }}
       >
         {renderActivityLine(branch, label)}
       </text>
 
-      {event.content ? (
+      {event.content && !collapsed ? (
         <text
           fg={getActivityColor(event)}
           attributes={
@@ -114,19 +135,31 @@ function ActivityNode({ event, isLast, trail }: ActivityNodeProps) {
         </text>
       ) : null}
 
-      {children.map((child, index) => (
-        <ActivityNode
-          key={child.id}
-          event={child}
-          isLast={index === children.length - 1}
-          trail={childTrail}
-        />
-      ))}
+      {!collapsed
+        ? event.children.map((child, index) => (
+            <ActivityNode
+              key={child.id}
+              collapsedActivityNodes={collapsedActivityNodes}
+              event={child}
+              isLast={index === event.children.length - 1}
+              onToggleActivityNode={onToggleActivityNode}
+              trail={childTrail}
+            />
+          ))
+        : null}
     </box>
   );
 }
 
-function ActivityTree({ events }: { events: TranscriptActivityEvent[] }) {
+function ActivityTree({
+  collapsedActivityNodes,
+  events,
+  onToggleActivityNode,
+}: {
+  collapsedActivityNodes: Record<string, boolean>;
+  events: TranscriptActivityEvent[];
+  onToggleActivityNode: (id: string) => void;
+}) {
   const ordered = orderActivityTree(events);
 
   return (
@@ -134,8 +167,10 @@ function ActivityTree({ events }: { events: TranscriptActivityEvent[] }) {
       {ordered.map((event, index) => (
         <ActivityNode
           key={event.id}
+          collapsedActivityNodes={collapsedActivityNodes}
           event={event}
           isLast={index === ordered.length - 1}
+          onToggleActivityNode={onToggleActivityNode}
           trail=""
         />
       ))}
@@ -145,11 +180,13 @@ function ActivityTree({ events }: { events: TranscriptActivityEvent[] }) {
 
 function TranscriptRow({
   busy,
+  collapsedActivityNodes,
   divider,
   entry,
   expanded,
   isFirst,
   isLast,
+  onToggleActivityNode,
   onToggleExpanded,
 }: TranscriptRowProps) {
   const isUser = entry.role === "user";
@@ -162,7 +199,10 @@ function TranscriptRow({
     Boolean(entry.details?.length);
   const marker = isUser ? ">" : "*";
   const accent = isUser ? uiColors.userText : uiColors.text;
-  const summaryLine = entry.content || (!isUser && busy ? "Streaming..." : "");
+  const summaryLine =
+    isUser || !hasActivity
+      ? entry.content || (!isUser && busy ? "Streaming..." : "")
+      : "execution trace";
   const label = entry.title === "SYSTEM" ? "[system] " : "";
 
   return (
@@ -185,16 +225,19 @@ function TranscriptRow({
           marginTop: isFirst ? 0 : 0.15,
         }}
       >
-        <text fg={accent}>
-          {formatBlock(`${label}${summaryLine || "..."}`, marker)}
-        </text>
+        {summaryLine ? (
+          <text fg={accent}>
+            {formatBlock(`${label}${summaryLine}`, marker)}
+          </text>
+        ) : null}
 
         {hasDetails ? (
-          <box
-            style={{ flexDirection: "column", marginTop: 0.5 }}
-            onMouseDown={() => onToggleExpanded(entry.id)}
-          >
-            <text fg={uiColors.subtle} attributes={TextAttributes.DIM}>
+          <box style={{ flexDirection: "column", marginTop: 0.5 }}>
+            <text
+              fg={uiColors.subtle}
+              attributes={TextAttributes.DIM}
+              onMouseDown={() => onToggleExpanded(entry.id)}
+            >
               {entry.usage
                 ? `${expanded ? "[-]" : "[+]"} ${entry.usage}`
                 : `${expanded ? "[-]" : "[+]"} trace`}
@@ -209,7 +252,11 @@ function TranscriptRow({
                 }}
               >
                 {entry.activity?.length ? (
-                  <ActivityTree events={entry.activity} />
+                  <ActivityTree
+                    collapsedActivityNodes={collapsedActivityNodes}
+                    events={entry.activity}
+                    onToggleActivityNode={onToggleActivityNode}
+                  />
                 ) : null}
 
                 {!entry.activity?.length && entry.reasoning ? (
@@ -266,9 +313,11 @@ function TranscriptRow({
 
 export function TranscriptView({
   busy,
+  collapsedActivityNodes,
   divider,
   entries,
   expandedEntries,
+  onToggleActivityNode,
   onToggleExpanded,
 }: TranscriptViewProps) {
   return (
@@ -285,11 +334,13 @@ export function TranscriptView({
           <TranscriptRow
             key={entry.id}
             busy={busy}
+            collapsedActivityNodes={collapsedActivityNodes}
             divider={divider}
             entry={entry}
             expanded={Boolean(expandedEntries[entry.id])}
             isFirst={index === 0}
             isLast={index === entries.length - 1}
+            onToggleActivityNode={onToggleActivityNode}
             onToggleExpanded={onToggleExpanded}
           />
         ))}
